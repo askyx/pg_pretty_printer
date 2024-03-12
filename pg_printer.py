@@ -3,19 +3,14 @@ import string
 import re
 import os
 import sys
+from functools import reduce
+import operator
 
-# TODO: some no printer filed add to child
-
-current_file_path = os.path.abspath(__file__)
-
-current_dir = os.path.dirname(current_file_path)
-
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from node_struct import *
 
-printer = gdb.printing.RegexpCollectionPrettyPrinter("Greenplum-7.0.0")
+printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_16_STABLE')
 
 def register_printer(name):
     def __registe(_printer):
@@ -32,29 +27,25 @@ def cast(node, type_name):
     t = gdb.lookup_type(type_name)
     return node.cast(t.pointer())
 
-def add_list(list, val, filde):
-    if str(val[filde]) != '0x0':
-        list.append((filde, val[filde].dereference()))
-
 # max print 100
-def getchars(arg, qoute = True, len = 100):
+def getchars(arg, quote = True, length = 100):
     if (str(arg) == '0x0'):
-        return str(arg)
+        return '0x0'
 
     retval = ''
-    if qoute:
+    if quote:
         retval += '\''
 
     i = 0
-    while arg[i] != ord("\0") and i < len:
-        character = int(arg[i].cast(gdb.lookup_type("char")))
+    while arg[i] != ord('\0') and i < length:
+        character = int(arg[i].cast(gdb.lookup_type('char')))
         if chr(character) in string.printable:
-            retval += "%c" % chr(character)
+            retval += '%c' % chr(character)
         else:
-            retval += "\\x%x" % character
+            retval += '\\x%x' % character
         i += 1
 
-    if qoute:
+    if quote:
         retval += '\''
 
     return retval
@@ -63,145 +54,204 @@ class BasePrinter:
     def __init__(self, val) -> None:
         self.val = val
 
+    def get_item(self, field):
+        f = field.split('.')
+        return reduce(operator.getitem, f, self.val)
+
     def print_to_string(self, header, field):
-        pod = field
-        size = len(pod)
-        ret = header
+        if len(field) == 0:
+            return header
+        head = header
+        if re.search('path\.', field[0][1]):
+            f = field[0][1].split('.')[:-1]
+            head += self.path_to_string(reduce(operator.getitem, f, self.val)) + ' '
+            field = [x for x in field if not re.search('path\.', x[1])]
+        elif re.search('plan\.', field[0][1]):
+            f = field[0][1].split('.')[:-1]
+            head += self.plan_to_string(reduce(operator.getitem, f, self.val)) + ' '
+            field = [x for x in field if not re.search('plan\.', x[1])]
+
+        size = len(field)
         if size > 1:
-            ret += '{'
+            head += '{'
 
         ss = []
-        for arg in pod:
+        for arg in field:
             if arg[0] == 'QualCost':
-                s = '{}: ({:.2f}..{:.2f})'.format(arg[1], float(self.val[arg[1]]['startup']), float(self.val[arg[1]]['per_tuple']))
+                s = '{}: ({:.2f}..{:.2f})'.format(arg[1], float(self.get_item(arg[1])['startup']), float(self.get_item(arg[1])['per_tuple']))
+            elif arg[0] == 'Bitmapset*':
+                s = '%s: %s' % (arg[1], '0x0'if str(self.get_item(arg[1])) == '0x0' else self.get_item(arg[1]).dereference())
+            elif arg[0] == 'Selectivity':
+                s = '{}: {:.4f}'.format(arg[1], float(self.get_item(arg[1])))
             else:
-                s = '%s: %s' % (arg[1], getchars(self.val[arg[1]]) if arg[0] == 'char*' else self.val[arg[1]])
+                s = '{}: {}'.format(arg[1], getchars(self.get_item(arg[1])) if arg[0] == 'char*' else self.get_item(arg[1]))
             ss.append(s)
 
-        ret += ', '.join(ss)
+        head += ', '.join(ss)
 
         if size > 1:
-            ret += '}'
+            head += '}'
 
-        return ret
+        return head
     
+    def add_to_list(self, list, arg):
+        k = arg.split('.')
+        v = reduce(operator.getitem, k, self.val)
+        if str(v) != '0x0':
+            if re.search('parent', arg):
+                list += [(arg, v['relids'].dereference())]
+            else:
+                list += [(arg, v.dereference())]
+
     def print_children(self, field):
         list = []
         for arg in field:
-            add_list(list, self.val, arg[1])
+            self.add_to_list(list, arg[1])
         return list
     
-    def plan_to_string(self, type, plan):
-        return '{} (cost={:.2f}..{:.2f} rows={:.0f} width={:.0f} memo={} plan_id={} parallel_aware={} parallel_safe = {})'.format(
-            str(type),
+    def plan_to_string(self, plan):
+        return '(cost={:.2f}..{:.2f} rows={:.0f} width={:.0f} async_capable={} plan_id={} parallel_aware={} parallel_safe = {})'.format(
             float(plan['startup_cost']),
             float(plan['total_cost']),
             float(plan['plan_rows']),
             float(plan['plan_width']),
-            int(plan['operatorMemKB']),
+            int(plan['async_capable']),
             int(plan['plan_node_id']),
             bool(plan['parallel_aware']),
             bool(plan['parallel_safe'])
         )
     
-    def plan_children(self, plan):
-        list = []
-        add_list(list, plan, 'targetlist')
-        add_list(list, plan, 'qual')
-        add_list(list, plan, 'initPlan')
-        add_list(list, plan, 'extParam')
-        add_list(list, plan, 'allParam')
-        add_list(list, plan, 'flow')
-        add_list(list, plan, 'lefttree')
-        add_list(list, plan, 'righttree')
-        return list
-    
-    def path_to_string(self, type, path):
-        return '{} {} (cost={:.2f}..{:.2f} rows={:.0f} memo={} parallel_aware={} parallel_safe={} parallel_workers={} motionHazard={} rescannable={} sameslice_relids={})'.format(
-            type,
+    def path_to_string(self, path):
+        return '{} (cost={:.2f}..{:.2f} rows={:.0f} parallel_aware={} parallel_safe={} parallel_workers={})'.format(
             path['pathtype'],
             float(path['startup_cost']),
             float(path['total_cost']),
             float(path['rows']),
-            float(path['memory']),
             bool(path['parallel_aware']),
             bool(path['parallel_safe']),
             int(path['parallel_workers']),
-            bool(path['motionHazard']),
-            bool(path['rescannable']),
-            path['sameslice_relids']
         )
-
-    #  RelOptInfo is so huge
-    def path_children(self, path):
-        list = []
-        list.append(('locus', path['locus']))
-        add_list(list, path, 'pathtarget')
-        add_list(list, path, 'param_info')
-        add_list(list, path, 'pathkeys')
-        return list
-
-    def join_to_string(self, type):
-        ext = ' inner_unique: {} prefetch_inner: {}'.format(self.val['join']['inner_unique'], self.val['join']['prefetch_inner'])
-        return type + ' ' + self.plan_to_string(self.val['join']['jointype'], self.val['join']['plan']) + ext
-
-    def join_children(self):
-        list = self.plan_children(self.val['join']['plan'])
-        add_list(list, self.val['join'], 'joinqual')
-        return list
-
-    def jpath_to_string(self, type):
-        ext = ' inner_unique: {}'.format(self.val['jpath']['inner_unique'])
-        return type + ' ' + self.path_to_string(self.val['jpath']['jointype'], self.val['jpath']['path']) + ext
-
-    def jpath_children(self):
-        list = self.path_children(self.val['jpath']['path'])
-        add_list(list, self.val['jpath'], 'joinrestrictinfo')
-        add_list(list, self.val['jpath'], 'outerjoinpath')
-        add_list(list, self.val['jpath'], 'innerjoinpath')
-        return list
 
     def display_hint(self):
         return ''
 
+def bms_next_member(val, prevbit, bit_per_w):
+    if str(val) == '0x0':
+        return -2
+
+    nwords = val['nwords']
+    prevbit += 1
+    mm = 0
+    if bit_per_w == 64:
+        mm = 0xFFFFFFFFFFFFFFFF
+    else:
+        mm = 0xFFFFFFFF
+
+    mask = (mm << int(prevbit % bit_per_w)) & mm
+
+    for wordnum in range(prevbit // bit_per_w, nwords):
+        w = int(val['words'][wordnum] & mask)
+        if w != 0:
+            return int(wordnum * bit_per_w + w.bit_length() - len(bin(w).rstrip('0')) + 2)
+        mask = mm
+    return -2
+
 @register_printer('Bitmapset')
 class BitmapsetPrinter(BasePrinter):
     def to_string(self):
+        return getchars(gdb.parse_and_eval('nodeToString({})'.format(self.val.reference_value().address)), False)
+        # do it by yourself, flowing code is not work, it may cause 'maximum recursion depth exceeded in comparison' error
+        # why? anything wrong with my code?
+        # if we want run this to debug a core file, must resolve this issue first.
         list = []
-        index = int(gdb.parse_and_eval('bms_next_member({}, {})'.format(self.val.reference_value().address, -1)))
+        BITS_PER_BITMAPWORD = 64 if platform.architecture()[0] == '64bit' else 32
+        index = bms_next_member(self.val, -1, BITS_PER_BITMAPWORD)
         while index >= 0:
             list.append(index)
-            index = int(gdb.parse_and_eval('bms_next_member({}, {})'.format(self.val.reference_value().address, index)))
+            index = bms_next_member(self.val, index, BITS_PER_BITMAPWORD)
 
         return str(list)
 
 @register_printer('Relids')
 class RelidsPrinter(BasePrinter):
     def to_string(self):
-        return self.val.address.cast(gdb.lookup_type('Bitmapset').pointer()).dereference()
+        return getchars(gdb.parse_and_eval('nodeToString({})'.format(self.val.referenced_value().address)), False)
+
+@register_printer('IndexOptInfo')
+class IndexOptInfoPrinter(BasePrinter):
+    def to_string(self):
+        return self.print_to_string('IndexOptInfo ',
+                                 [ ('Oid', 'indexoid'),
+                                   ('Oid', 'reltablespace'),
+                                   ('BlockNumber', 'pages'),
+                                   ('Cardinality', 'tuples'),
+                                   ('int', 'tree_height'),
+                                   ('int', 'ncolumns'),
+                                   ('Oid', 'relam'),
+                                   ('bool', 'predOK'),
+                                   ('bool', 'unique'),
+                                   ('bool', 'immediate'),
+                                   ('bool', 'hypothetical'),
+                                   ('bool', 'amcanorderbyop'),
+                                   ('bool', 'amoptionalkey'),
+                                   ('bool', 'amsearcharray'),
+                                   ('bool', 'amsearchnulls'),
+                                   ('bool', 'amhasgettuple'),
+                                   ('bool', 'amhasgetbitmap'),
+                                   ('bool', 'amcanparallel'),
+                                   ('bool', 'amcanmarkpos')])
+
+    def children(self):
+        list = []
+        nkeycolumns = int(self.val['nkeycolumns'])
+        indexkeys = [int(self.val['indexkeys'][i]) for i in range(nkeycolumns)]
+        indexcollations = [int(self.val['indexcollations'][i]) for i in range(nkeycolumns)]
+        opfamily = [int(self.val['opfamily'][i]) for i in range(nkeycolumns)]
+        opcintype = [int(self.val['opcintype'][i]) for i in range(nkeycolumns)]
+        sortopfamily = [int(self.val['sortopfamily'][i]) for i in range(nkeycolumns)]
+        reverse_sort = [bool(self.val['reverse_sort'][i]) for i in range(nkeycolumns)]
+        nulls_first = [bool(self.val['nulls_first'][i]) for i in range(nkeycolumns)]
+        canreturn = [bool(self.val['canreturn'][i]) for i in range(nkeycolumns)]
+
+        if nkeycolumns != 0:
+            list.append(('indexkeys', str(indexkeys)))
+            list.append(('indexcollations', str(indexcollations)))
+            list.append(('opfamily', str(opfamily)))
+            list.append(('opcintype', str(opcintype)))
+            list.append(('sortopfamily', str(sortopfamily)))
+            list.append(('reverse_sort', str(reverse_sort)))
+            list.append(('nulls_first', str(nulls_first)))
+            list.append(('canreturn', str(canreturn)))
+
+        list += self.print_children([
+            ('List*', 'indpred'),
+            ('List*', 'indextlist'),
+            ('List*', 'indrestrictinfo')])
+
+        return list
+
 
 pl = {
-    'Alias': Alias,                 'RangeVar': RangeVar,       'TableFunc': TableFunc,             'IntoClause': IntoClause,
-    'Var': Var,                     'Const': Const,             'Param': Param,                     'Aggref': Aggref,
-    'GroupingFunc': GroupingFunc,   'WindowFunc': WindowFunc,   'SubscriptingRef': SubscriptingRef, 'FuncExpr': FuncExpr,
-    'NamedArgExpr': NamedArgExpr,   'OpExpr': OpExpr,           'DistinctExpr': DistinctExpr,       'NullIfExpr': NullIfExpr,
-    'FieldStore': FieldStore,       'RelabelType': RelabelType, 'CoerceViaIO': CoerceViaIO,         'ArrayCoerceExpr': ArrayCoerceExpr,
-    'ScalarArrayOpExpr': ScalarArrayOpExpr,                     'BoolExpr': BoolExpr,               'SubLink': SubLink,
-    'ConvertRowtypeExpr': ConvertRowtypeExpr,                   'CollateExpr': CollateExpr,         'CaseExpr': CaseExpr,
-    'SubPlan': SubPlan,             'AlternativeSubPlan': AlternativeSubPlan,                       'FieldSelect': FieldSelect,
-    'CaseWhen': CaseWhen,           'CaseTestExpr': CaseTestExpr,                                   'ArrayExpr': ArrayExpr,
-    'RowExpr': RowExpr,             'RowCompareExpr': RowCompareExpr,                               'CoalesceExpr': CoalesceExpr,
-    'MinMaxExpr': MinMaxExpr,       'SQLValueFunction': SQLValueFunction,                           'XmlExpr': XmlExpr,
-    'JsonFormat': JsonFormat,       'JsonReturning': JsonReturning,                                 'JsonValueExpr': JsonValueExpr,
+    'Alias': Alias,                         'RangeVar': RangeVar,               'TableFunc': TableFunc,             'IntoClause': IntoClause,
+    'Var': Var,                             'Const': Const,                     'Param': Param,                     'Aggref': Aggref,
+    'GroupingFunc': GroupingFunc,           'WindowFunc': WindowFunc,           'SubscriptingRef': SubscriptingRef, 'FuncExpr': FuncExpr,
+    'NamedArgExpr': NamedArgExpr,           'OpExpr': OpExpr,                   'DistinctExpr': DistinctExpr,       'NullIfExpr': NullIfExpr,
+    'FieldStore': FieldStore,               'RelabelType': RelabelType,         'CoerceViaIO': CoerceViaIO,         'ArrayCoerceExpr': ArrayCoerceExpr,
+    'CaseWhen': CaseWhen,                   'CaseTestExpr': CaseTestExpr,       'ArrayExpr': ArrayExpr,             'RowExpr': RowExpr,
+    'RowCompareExpr': RowCompareExpr,       'CoalesceExpr': CoalesceExpr,       'MinMaxExpr': MinMaxExpr,           'SubLink': SubLink,
+    'SQLValueFunction': SQLValueFunction,   'XmlExpr': XmlExpr,                 'JsonFormat': JsonFormat,           'JsonReturning': JsonReturning,                                     'JsonValueExpr': JsonValueExpr,
+    'ScalarArrayOpExpr': ScalarArrayOpExpr,                     'BoolExpr': BoolExpr,                   
+    'ConvertRowtypeExpr': ConvertRowtypeExpr,                   'CollateExpr': CollateExpr,             'CaseExpr': CaseExpr,
     'JsonConstructorExpr': JsonConstructorExpr,
     'JsonIsPredicate': JsonIsPredicate,    'NullTest': NullTest,    'BooleanTest': BooleanTest,
+    'SubPlan': SubPlan,             'AlternativeSubPlan': AlternativeSubPlan,                       'FieldSelect': FieldSelect,
     'CoerceToDomain': CoerceToDomain,    'CoerceToDomainValue': CoerceToDomainValue,    'SetToDefault': SetToDefault,
     'CurrentOfExpr': CurrentOfExpr,    'NextValueExpr': NextValueExpr,    'InferenceElem': InferenceElem,    'TargetEntry': TargetEntry,
     'RangeTblRef': RangeTblRef,    'JoinExpr': JoinExpr,    'FromExpr': FromExpr,
     'OnConflictExpr': OnConflictExpr,
     'Query': Query,    'TypeName': TypeName,    'ColumnRef': ColumnRef,
     'ParamRef': ParamRef,    'A_Expr': A_Expr,    'A_Const': A_Const,
-    'TypeCast': TypeCast,    'CollateClause': CollateClause,    'RoleSpec': RoleSpec,    'FuncCall': FuncCall,    'A_Star': A_Star,
+    'TypeCast': TypeCast,    'CollateClause': CollateClause,    'RoleSpec': RoleSpec,    'FuncCall': FuncCall,   
     'A_Indices': A_Indices,    'A_Indirection': A_Indirection,    'A_ArrayExpr': A_ArrayExpr,
     'ResTarget': ResTarget,    'MultiAssignRef': MultiAssignRef,    'SortBy': SortBy,    'WindowDef': WindowDef,
     'RangeSubselect': RangeSubselect,    'RangeFunction': RangeFunction,    'RangeTableFunc': RangeTableFunc,
@@ -254,7 +304,7 @@ pl = {
     'DropdbStmt': DropdbStmt,    'AlterSystemStmt': AlterSystemStmt,    'ClusterStmt': ClusterStmt,
     'VacuumStmt': VacuumStmt,
     'VacuumRelation': VacuumRelation,    'ExplainStmt': ExplainStmt,    'CreateTableAsStmt': CreateTableAsStmt,
-    'RefreshMatViewStmt': RefreshMatViewStmt,    'CheckPointStmt': CheckPointStmt,    'DiscardStmt': DiscardStmt,
+    'RefreshMatViewStmt': RefreshMatViewStmt,     'DiscardStmt': DiscardStmt,
     'LockStmt': LockStmt,    'ConstraintsSetStmt': ConstraintsSetStmt,    'ReindexStmt': ReindexStmt,
     'CreateConversionStmt': CreateConversionStmt,    'CreateCastStmt': CreateCastStmt,    'CreateTransformStmt': CreateTransformStmt,
     'PrepareStmt': PrepareStmt,    'ExecuteStmt': ExecuteStmt,    'DeallocateStmt': DeallocateStmt,
@@ -262,7 +312,7 @@ pl = {
     'AlterTSConfigurationStmt': AlterTSConfigurationStmt,    'PublicationTable': PublicationTable,    'PublicationObjSpec': PublicationObjSpec,
     'CreatePublicationStmt': CreatePublicationStmt,    'AlterPublicationStmt': AlterPublicationStmt,    'CreateSubscriptionStmt': CreateSubscriptionStmt,
     'AlterSubscriptionStmt': AlterSubscriptionStmt,    'DropSubscriptionStmt': DropSubscriptionStmt,    'PlannerGlobal': PlannerGlobal,
-    'PlannerInfo': PlannerInfo,    'RelOptInfo': RelOptInfo,    'IndexOptInfo': IndexOptInfo,
+    'PlannerInfo': PlannerInfo,    'RelOptInfo': RelOptInfo,
     'ForeignKeyOptInfo': ForeignKeyOptInfo,    'StatisticExtInfo': StatisticExtInfo,    'JoinDomain': JoinDomain,
     'EquivalenceClass': EquivalenceClass,    'EquivalenceMember': EquivalenceMember,    'PathKey': PathKey,    'PathTarget': PathTarget,    'ParamPathInfo': ParamPathInfo,
     'RestrictInfo': RestrictInfo,    'PlaceHolderVar': PlaceHolderVar,    'SpecialJoinInfo': SpecialJoinInfo,
@@ -272,183 +322,125 @@ pl = {
     'PlannedStmt': PlannedStmt,    'PlanRowMark': PlanRowMark,    'PartitionPruneInfo': PartitionPruneInfo,
     'PartitionedRelPruneInfo': PartitionedRelPruneInfo,    'PartitionPruneStep': PartitionPruneStep,    'PartitionPruneStepOp': PartitionPruneStepOp,
     'PartitionPruneStepCombine': PartitionPruneStepCombine,    'PlanInvalItem': PlanInvalItem,    'ExtensibleNode': ExtensibleNode,
-    'ForeignKeyCacheInfo': ForeignKeyCacheInfo,    'Flow': Flow,    'PlanSlice': PlanSlice,
-    'DirectDispatchInfo': DirectDispatchInfo,    'CdbPathLocus': CdbPathLocus, 'DistributionKey': DistributionKey,
+    'ForeignKeyCacheInfo': ForeignKeyCacheInfo,   
+
+    # path
+    'Path': Path,    'IndexPath': IndexPath,    'BitmapHeapPath': BitmapHeapPath,    'BitmapAndPath': BitmapAndPath,    'BitmapOrPath': BitmapOrPath,
+    'TidPath': TidPath,    'SubqueryScanPath': SubqueryScanPath,    'ForeignPath': ForeignPath,    'CustomPath': CustomPath,
+    'AppendPath': AppendPath,    'MergeAppendPath': MergeAppendPath,    'GroupResultPath': GroupResultPath,    'MaterialPath': MaterialPath,
+    'UniquePath': UniquePath,    'GatherPath': GatherPath,    'GatherMergePath': GatherMergePath,    'ProjectionPath': ProjectionPath,
+    'ProjectSetPath': ProjectSetPath,    'SortPath': SortPath,    'GroupPath': GroupPath,    'UpperUniquePath': UpperUniquePath,
+    'AggPath': AggPath,    'GroupingSetsPath': GroupingSetsPath,    'MinMaxAggPath': MinMaxAggPath,    'WindowAggPath': WindowAggPath,
+    'SetOpPath': SetOpPath,    'RecursiveUnionPath': RecursiveUnionPath,    'LockRowsPath': LockRowsPath,    'ModifyTablePath': ModifyTablePath,
+    'LimitPath': LimitPath,    'MergePath': MergePath,    'HashPath': HashPath,
+
+    # plan
+    'Plan': Plan,    'Result': Result,    'ProjectSet': ProjectSet,    'ModifyTable': ModifyTable,    'Append': Append,    'MergeAppend': MergeAppend,
+    'RecursiveUnion': RecursiveUnion,    'BitmapAnd': BitmapAnd,    'BitmapOr': BitmapOr,    'Scan': Scan,    'SeqScan': SeqScan,    'SampleScan': SampleScan,
+    'IndexScan': IndexScan,    'IndexOnlyScan': IndexOnlyScan,    'BitmapIndexScan': BitmapIndexScan,    'BitmapHeapScan': BitmapHeapScan,
+    'TidScan': TidScan,    'TidRangeScan': TidRangeScan,    'SubqueryScan': SubqueryScan,    'FunctionScan': FunctionScan,
+    'ValuesScan': ValuesScan,    'TableFuncScan': TableFuncScan,    'CteScan': CteScan,    'NamedTuplestoreScan': NamedTuplestoreScan,
+    'WorkTableScan': WorkTableScan,    'ForeignScan': ForeignScan,    'CustomScan': CustomScan,    'Material': Material,
+    'Memoize': Memoize,    'Sort': Sort,    'Group': Group,    'Agg': Agg,    'WindowAgg': WindowAgg,
+    'Unique': Unique,    'Gather': Gather,    'GatherMerge': GatherMerge,    'Hash': Hash,    'SetOp': SetOp,
+    'LockRows': LockRows,    'Limit': Limit,    'NestLoop': NestLoop,    'MergeJoin': MergeJoin,    'HashJoin': HashJoin,
 }
 
-# TODO: deal with sort option for numCols in 
-#       Motion, Sort 
-plans = {
-    'Result': Result,
-    'ProjectSet': ProjectSet,
-    'ModifyTable': ModifyTable,
-    'Append': Append,
-    'MergeAppend': MergeAppend,
-    'RecursiveUnion': RecursiveUnion,
-    'BitmapAnd': BitmapAnd,
-    'BitmapOr': BitmapOr,
-    'Scan': Scan,
-    'Material': Material,
-    'Memoize': Memoize,
-    'Sort': Sort,
-    'Group': Group,
-    'Agg': Agg,
-    'WindowAgg': WindowAgg,
-    'Unique': Unique,
-    'Gather': Gather,
-    'GatherMerge': GatherMerge,
-    'Hash': Hash,
-    'SetOp': SetOp,
-    'LockRows': LockRows,
-    'Limit': Limit,
-    'Motion': Motion,
-}
-
-joins = {
-    'NestLoop': NestLoop,
-    'MergeJoin': MergeJoin,
-    'HashJoin': HashJoin,
-}
-
-paths = {
-    'IndexPath': IndexPath,
-    'BitmapHeapPath': BitmapHeapPath,
-    'BitmapAndPath': BitmapAndPath,
-    'BitmapOrPath': BitmapOrPath,
-    'TidPath': TidPath,
-    'SubqueryScanPath': SubqueryScanPath,
-    'ForeignPath': ForeignPath,
-    'CustomPath': CustomPath,
-    'AppendPath': AppendPath,
-    'MergeAppendPath': MergeAppendPath,
-    'GroupResultPath': GroupResultPath,
-    'MaterialPath': MaterialPath,
-    'UniquePath': UniquePath,
-    'GatherPath': GatherPath,
-    'GatherMergePath': GatherMergePath,
-    'ProjectionPath': ProjectionPath,
-    'ProjectSetPath': ProjectSetPath,
-    'SortPath': SortPath,
-    'GroupPath': GroupPath,
-    'UpperUniquePath': UpperUniquePath,
-    'AggPath': AggPath,
-    'GroupingSetsPath': GroupingSetsPath,
-    'MinMaxAggPath': MinMaxAggPath,
-    'WindowAggPath': WindowAggPath,
-    'SetOpPath': SetOpPath,
-    'RecursiveUnionPath': RecursiveUnionPath,
-    'LockRowsPath': LockRowsPath,
-    'ModifyTablePath': ModifyTablePath,
-    'LimitPath': LimitPath,
-    'CdbMotionPath': CdbMotionPath,
-    'AppendOnlyPath': AppendOnlyPath,
-    'AOCSPath': AOCSPath,
-    'PartitionSelectorPath': PartitionSelectorPath,
-    'CtePath': CtePath,
-    'TableFunctionScanPath': TableFunctionScanPath,
-    'TupleSplitPath': TupleSplitPath,
-    'SplitUpdatePath': SplitUpdatePath,
-}
-
-basic = ['Plan', 'Expr', 'Path', 'Node', 'Join']
-
-jpath = {
-    'MergePath': MergePath,
-    'HashPath': HashPath,
-}
-
-def split_field(name, s):
+def split_field(s):
     pod_item = []
     pointer_item = []
 
     for key, val in s:
-        if key == 'Join' or key == 'Plan' or key == 'Path' or key == 'JoinPath':
-            pass
-        elif key == 'DirectDispatchInfo':
-            pointer_item.append([key, val])
-        elif re.search('\*', key) and key != 'char*':
+        if re.search('\*', key) and key != 'char*' and key != 'Bitmapset*':
             pointer_item.append([key, val])
         else:
             pod_item.append([key, val])
 
     return [pod_item, pointer_item]
 
-def gen_printer_class(name, fields, is_plan = False, is_join = False, is_path = False, is_jpath = False):
+def node_type(node):
+    return str(node['type'])[2:]
+
+def gen_printer_class(name, fields):
     class Printer(BasePrinter):
         def to_string(self):
-            if is_plan:
-                return self.plan_to_string(name, self.val['plan']) + self.print_to_string(' ', fields[0])
-            elif is_join:
-                return self.join_to_string(name) + self.print_to_string(' ', fields[0])
-            elif is_path:
-                return self.path_to_string(name, self.val['path']) + self.print_to_string(' ', fields[0])
-            elif is_jpath:
-                return self.jpath_to_string(name) + self.print_to_string(' ', fields[0])
+            if name == 'Path':
+                if node_type(self.val) == 'Path':
+                    return self.path_to_string(self.val)
+                else:
+                    return cast(self.val.address, node_type(self.val)).dereference()
+            elif name == 'Plan':
+                return cast(self.val.address, node_type(self.val)).dereference()
             else:
                 return self.print_to_string('%s ' % name, fields[0])
 
         def children(self):
-            if is_plan:
-                return self.print_children(fields[1]) + self.plan_children(self.val['plan'])
-            elif is_join:
-                return self.print_children(fields[1]) + self.join_children()
-            elif is_path:
-                return self.print_children(fields[1]) + self.path_children(self.val['path'])
-            elif is_jpath:
-                return self.print_children(fields[1]) + self.jpath_children()
-            else:
-                return self.print_children(fields[1])
+            if name == 'Path':
+                if node_type(self.val) != 'Path':
+                    return []
+            elif name == 'Plan':
+                return []
+            return self.print_children(fields[1])
 
     Printer.__name__ = name
     return Printer
 
-def get_node_type(node):
-    type = str(node['type'])[2:]
-    if type == 'String' or type == 'Integer' or type == 'Float' or type == 'BitString':
-        return 'Value'
-    return type
+@register_printer('(Node|Expr)')
+class CommonPrinter(BasePrinter):
+    def to_string(self):
+        self.type = node_type(self.val)
+        return cast(self.val.address, self.type).dereference()
 
-def gen_base_printer_class(name):
+@register_printer('A_Star')
+class A_StarPrinter(BasePrinter):
+    def to_string(self):
+        return '*'
+
+def gen_val_printer_class(name):
     class Printer(BasePrinter):
         def to_string(self):
-            self.type = get_node_type(self.val)
-            if self.type == 'A_Star':
-                return '*'
-            elif self.type == 'Path':
-                return self.path_to_string(self.type, self.val)
-            elif self.type == 'NestPath':
-                return self.jpath_to_string(self.type)
-            return cast(self.val.address, self.type).dereference()
+            vt = node_type(self.val)
+            ret = ''
+            if vt == 'Integer':
+                ret += str(self.val['ival'])
+            elif vt == 'Boolean':
+                ret += bool(self.val['boolval'])
+            elif vt == 'Float':
+                ret += getchars(self.val['fval'])
+            elif vt == 'String':
+                ret += getchars(self.val['sval'])
+            elif vt == 'BitString':
+                ret += getchars(self.val['bsval'])
+            return '{} [ {} ]'.format(vt, ret)
 
-        def children(self):
-            if self.type == 'Path':
-                return self.path_children(self.val)
-            elif self.type == 'NestPath':
-                return self.jpath_children()
-
-            return []
-        
     Printer.__name__ = name
     return Printer
+
+val_printer = ['Integer', 'Boolean', 'Float', 'String', 'BitString']
+
+@register_printer('ValUnion')
+class ValUnionPrinter(BasePrinter):
+    def to_string(self):
+        vt = str(self.val['node']['type'])[2:]
+        ret = ''
+        if vt == 'Integer':
+            ret += str(self.val['ival']['ival'])
+        elif vt == 'Float':
+            ret += getchars(self.val['fval']['fval'])
+        elif vt == 'Boolean':
+            ret += str(self.val['boolval']['boolval'])
+        elif vt == 'BitString':
+            ret += getchars(self.val['bsval']['bsval'])
+        elif vt == 'String':
+            ret += getchars(self.val['sval']['sval'])
+        return '{} [ {} ]'.format(vt, ret)
 
 def generate_printer():
     for name, s in pl.items():
-        pointerx = gen_printer_class(name, split_field(name, s))
+        pointerx = gen_printer_class(name, split_field(s))
         printer.add_printer(name, '^' + name + '$', pointerx)
-    for name, s in plans.items():
-        pointerx = gen_printer_class(name, split_field(name, s), True)
-        printer.add_printer(name, '^' + name + '$', pointerx)
-    for name, s in joins.items():
-        pointerx = gen_printer_class(name, split_field(name, s), False, True)
-        printer.add_printer(name, '^' + name + '$', pointerx)
-    for name, s in paths.items():
-        pointerx = gen_printer_class(name, split_field(name, s), False, False, True)
-        printer.add_printer(name, '^' + name + '$', pointerx)
-    for name, s in jpath.items():
-        pointerx = gen_printer_class(name, split_field(name, s), False, False, False, True)
-        printer.add_printer(name, '^' + name + '$', pointerx)
-    for name in basic:
-        pointerx = gen_base_printer_class(name)
+    for name in val_printer:
+        pointerx = gen_val_printer_class(name)
         printer.add_printer(name, '^' + name + '$', pointerx)
 
 generate_printer()
@@ -456,7 +448,7 @@ generate_printer()
 
 class ListIt(object):
     def __init__(self, list) -> None:
-        self.head = list['head']
+        self.elements = list['elements']
         self.size = list['length']
         self.count = 0
 
@@ -470,11 +462,10 @@ class ListIt(object):
         if self.count == self.size:
             raise StopIteration
 
-        head = self.head
-        self.head = self.head['next']
+        node = self.elements[self.count]
         self.count += 1
+        return node
 
-        return head
 
 @register_printer('List')
 class ListPrinter:
@@ -490,11 +481,11 @@ class ListPrinter:
         def __next__(self):
             node = next(self.it)
             if str(self.type) == 'List':
-                node = cast(node['data']['ptr_value'], 'Node').dereference()
+                node = cast(node['ptr_value'], 'Node').dereference()
             elif str(self.type) == 'IntList':
-                node = int(node['data']['int_value'])
+                node = int(node['int_value'])
             else:
-                node = int(node['data']['oid_value'])
+                node = int(node['oid_value'])
 
             result = (str(self.count), node)
             self.count += 1
@@ -516,16 +507,6 @@ class ListPrinter:
         else:
             return 'array'
 
-@register_printer('Value')
-class ValuePrinter(BasePrinter):
-    def to_string(self):
-        vt = str(self.val['type'])[2:]
-        ret = ''
-        if vt == 'Integer':
-            ret += str(self.val['val']['ival'])
-        elif vt == 'Float' or vt == 'BitString' or vt == 'String':
-            ret += getchars(self.val['val']['str'])
-        return '{}[ {} ]'.format(vt, ret)
 
 
 # @register_printer('Const')
@@ -537,13 +518,11 @@ class ValuePrinter(BasePrinter):
 #             pfunc = getTypeOutputInfo(int(self.val['consttype']))
 #             return str(gdb.parse_and_eval('OidOutputFunctionCall({}, {})'.format(pfunc[0], int(self.val['constvalue']))).dereference())
 
-def gen_base_any_node_printer_class():
-    class Printer(BasePrinter):
-        def to_string(self):
-            return getchars(gdb.parse_and_eval('pretty_format_node_dump(nodeToString({}))'.format(self.val.reference_value().address)), False, 100000000)
+class Printer(BasePrinter):
+    def to_string(self):
+        return getchars(gdb.parse_and_eval('pretty_format_node_dump(nodeToString({}))'.format(self.val.reference_value().address)), False, 100000000)
             
-    Printer.__name__ = 'AnyNode'
-    printer.add_printer('AnyNode', '^Node$', Printer)
+printer.add_printer('AnyNode', '^Node$', Printer)
 
 
 gdb.printing.register_pretty_printer(
