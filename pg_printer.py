@@ -27,6 +27,12 @@ def cast(node, type_name):
     t = gdb.lookup_type(type_name)
     return node.cast(t.pointer())
 
+def list_length(node):
+    return int(node['length'])
+
+def cast_to_pod(node, type):
+    return node.cast(gdb.lookup_type(type))
+
 # max print 100
 def getchars(arg, quote = True, length = 100):
     if (str(arg) == '0x0'):
@@ -98,8 +104,8 @@ class BasePrinter:
         k = arg.split('.')
         v = reduce(operator.getitem, k, self.val)
         if str(v) != '0x0':
-            if re.search('parent', arg):
-                list += [(arg, v['relids'].dereference())]
+            if re.search('^parent$', k[-1]):
+                list += [(arg, v['relids'])]
             else:
                 list += [(arg, v.dereference())]
 
@@ -109,6 +115,27 @@ class BasePrinter:
             self.add_to_list(list, arg[1])
         return list
     
+    def print_children_array(self, k, v):
+        list = []
+        size = 0
+        if k[0:11] == 'list_length':
+            val = self.val[str(k[k.index('(') + 1 : k.index(')')])]
+            if str(val) != '0x0':
+                size = int(list_length(val))
+        else:
+            size = int(self.get_item(k)) 
+
+        if size != 0:
+            for arg in v:
+                a_type = arg[0].split('[')[0]
+                if str(self.get_item(arg[1])) != '0x0':
+                    if a_type == 'bool':
+                        list.append((arg[1], str([bool(self.get_item(arg[1])[i]) for i in range(size)])))
+                    # if a_type in ['AttrNumber', 'Index', 'Oid', 'int']:
+                    else:
+                        list.append((arg[1], str([int(self.get_item(arg[1])[i]) for i in range(size)])))
+        return list
+
     def plan_to_string(self, plan):
         return '(cost={:.2f}..{:.2f} rows={:.0f} width={:.0f} async_capable={} plan_id={} parallel_aware={} parallel_safe = {})'.format(
             float(plan['startup_cost']),
@@ -176,60 +203,6 @@ class BitmapsetPrinter(BasePrinter):
 class RelidsPrinter(BasePrinter):
     def to_string(self):
         return getchars(gdb.parse_and_eval('nodeToString({})'.format(self.val.referenced_value().address)), False)
-
-@register_printer('IndexOptInfo')
-class IndexOptInfoPrinter(BasePrinter):
-    def to_string(self):
-        return self.print_to_string('IndexOptInfo ',
-                                 [ ('Oid', 'indexoid'),
-                                   ('Oid', 'reltablespace'),
-                                   ('BlockNumber', 'pages'),
-                                   ('Cardinality', 'tuples'),
-                                   ('int', 'tree_height'),
-                                   ('int', 'ncolumns'),
-                                   ('Oid', 'relam'),
-                                   ('bool', 'predOK'),
-                                   ('bool', 'unique'),
-                                   ('bool', 'immediate'),
-                                   ('bool', 'hypothetical'),
-                                   ('bool', 'amcanorderbyop'),
-                                   ('bool', 'amoptionalkey'),
-                                   ('bool', 'amsearcharray'),
-                                   ('bool', 'amsearchnulls'),
-                                   ('bool', 'amhasgettuple'),
-                                   ('bool', 'amhasgetbitmap'),
-                                   ('bool', 'amcanparallel'),
-                                   ('bool', 'amcanmarkpos')])
-
-    def children(self):
-        list = []
-        nkeycolumns = int(self.val['nkeycolumns'])
-        indexkeys = [int(self.val['indexkeys'][i]) for i in range(nkeycolumns)]
-        indexcollations = [int(self.val['indexcollations'][i]) for i in range(nkeycolumns)]
-        opfamily = [int(self.val['opfamily'][i]) for i in range(nkeycolumns)]
-        opcintype = [int(self.val['opcintype'][i]) for i in range(nkeycolumns)]
-        sortopfamily = [int(self.val['sortopfamily'][i]) for i in range(nkeycolumns)]
-        reverse_sort = [bool(self.val['reverse_sort'][i]) for i in range(nkeycolumns)]
-        nulls_first = [bool(self.val['nulls_first'][i]) for i in range(nkeycolumns)]
-        canreturn = [bool(self.val['canreturn'][i]) for i in range(nkeycolumns)]
-
-        if nkeycolumns != 0:
-            list.append(('indexkeys', str(indexkeys)))
-            list.append(('indexcollations', str(indexcollations)))
-            list.append(('opfamily', str(opfamily)))
-            list.append(('opcintype', str(opcintype)))
-            list.append(('sortopfamily', str(sortopfamily)))
-            list.append(('reverse_sort', str(reverse_sort)))
-            list.append(('nulls_first', str(nulls_first)))
-            list.append(('canreturn', str(canreturn)))
-
-        list += self.print_children([
-            ('List*', 'indpred'),
-            ('List*', 'indextlist'),
-            ('List*', 'indrestrictinfo')])
-
-        return list
-
 
 pl = {
     'Alias': Alias,                         'RangeVar': RangeVar,               'TableFunc': TableFunc,             'IntoClause': IntoClause,
@@ -322,7 +295,7 @@ pl = {
     'PlannedStmt': PlannedStmt,    'PlanRowMark': PlanRowMark,    'PartitionPruneInfo': PartitionPruneInfo,
     'PartitionedRelPruneInfo': PartitionedRelPruneInfo,    'PartitionPruneStep': PartitionPruneStep,    'PartitionPruneStepOp': PartitionPruneStepOp,
     'PartitionPruneStepCombine': PartitionPruneStepCombine,    'PlanInvalItem': PlanInvalItem,    'ExtensibleNode': ExtensibleNode,
-    'ForeignKeyCacheInfo': ForeignKeyCacheInfo,   
+    'ForeignKeyCacheInfo': ForeignKeyCacheInfo, 'IndexOptInfo': IndexOptInfo,
 
     # path
     'Path': Path,    'IndexPath': IndexPath,    'BitmapHeapPath': BitmapHeapPath,    'BitmapAndPath': BitmapAndPath,    'BitmapOrPath': BitmapOrPath,
@@ -332,7 +305,7 @@ pl = {
     'ProjectSetPath': ProjectSetPath,    'SortPath': SortPath,    'GroupPath': GroupPath,    'UpperUniquePath': UpperUniquePath,
     'AggPath': AggPath,    'GroupingSetsPath': GroupingSetsPath,    'MinMaxAggPath': MinMaxAggPath,    'WindowAggPath': WindowAggPath,
     'SetOpPath': SetOpPath,    'RecursiveUnionPath': RecursiveUnionPath,    'LockRowsPath': LockRowsPath,    'ModifyTablePath': ModifyTablePath,
-    'LimitPath': LimitPath,    'MergePath': MergePath,    'HashPath': HashPath,
+    'LimitPath': LimitPath,    'MergePath': MergePath,    'HashPath': HashPath, 'JoinPath': JoinPath,  'NestPath': NestPath,
 
     # plan
     'Plan': Plan,    'Result': Result,    'ProjectSet': ProjectSet,    'ModifyTable': ModifyTable,    'Append': Append,    'MergeAppend': MergeAppend,
@@ -349,14 +322,17 @@ pl = {
 def split_field(s):
     pod_item = []
     pointer_item = []
+    array_item = []
 
     for key, val in s:
-        if re.search('\*', key) and key != 'char*' and key != 'Bitmapset*':
+        if re.search('\[', key):
+            array_item.append([key, val])
+        elif re.search('\*', key) and key != 'char*' and key != 'Bitmapset*':
             pointer_item.append([key, val])
         else:
             pod_item.append([key, val])
 
-    return [pod_item, pointer_item]
+    return [pod_item, pointer_item, array_item]
 
 def node_type(node):
     return str(node['type'])[2:]
@@ -375,12 +351,25 @@ def gen_printer_class(name, fields):
                 return self.print_to_string('%s ' % name, fields[0])
 
         def children(self):
+            list = []
             if name == 'Path':
                 if node_type(self.val) != 'Path':
                     return []
             elif name == 'Plan':
                 return []
-            return self.print_children(fields[1])
+            if len(fields[2]) != 0:
+                result = {}
+                for t in fields[2]:
+                    key = t[0][t[0].index('[') + 1 : t[0].index(']')]
+                    if key in result:
+                        result[key].append(t)
+                    else:
+                        result[key] = [t]
+
+                for k, v in result.items():
+                    list += self.print_children_array(k, v)
+
+            return list + self.print_children(fields[1])
 
     Printer.__name__ = name
     return Printer
