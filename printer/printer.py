@@ -1,14 +1,10 @@
 import gdb
 import string
 import re
-import os
-import sys
 from functools import reduce
 import operator
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from node_struct import *
+from .node_struct import *
 
 printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_16_STABLE')
 
@@ -513,11 +509,6 @@ class Printer(BasePrinter):
             
 printer.add_printer('AnyNode', '^Node$', Printer)
 
-
-gdb.printing.register_pretty_printer(
-    gdb.current_objfile(),
-    printer, True)
-
 class printVerbose(gdb.Parameter):
     def __init__(self) -> None:
         super(printVerbose, self).__init__('print pg_pretty', gdb.COMMAND_DATA, gdb.PARAM_ENUM, ['off', 'origin', 'trace', 'info'])
@@ -557,3 +548,7 @@ class printVerbose(gdb.Parameter):
             return 'Current value is {}, Trying to call some built-in functions to simple object, but may loss of information'.format(self.value)
 
 printVerbose()
+
+def register_postgres_printers(obj):
+    gdb.printing.register_pretty_printer(obj, printer, True)
+    printVerbose()
