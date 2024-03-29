@@ -4,7 +4,7 @@ import re
 from functools import reduce
 import operator
 
-from .node_struct import *
+from . import node_struct
 
 printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_16_STABLE')
 
@@ -82,7 +82,7 @@ class BasePrinter:
             if arg[0] == 'QualCost':
                 s = '{}: ({:.2f}..{:.2f})'.format(arg[1], float(self.get_item(arg[1])['startup']), float(self.get_item(arg[1])['per_tuple']))
             elif arg[0] == 'Bitmapset*':
-                s = '%s: %s' % (arg[1], '0x0'if str(self.get_item(arg[1])) == '0x0' else self.get_item(arg[1]).dereference())
+                s = '%s: %s' % (arg[1], '0x0' if str(self.get_item(arg[1])) == '0x0' else self.get_item(arg[1]).dereference())
             elif arg[0] == 'Selectivity':
                 s = '{}: {:.4f}'.format(arg[1], float(self.get_item(arg[1])))
             else:
@@ -182,7 +182,7 @@ def bms_next_member(val, prevbit, bit_per_w):
 @register_printer('Bitmapset')
 class BitmapsetPrinter(BasePrinter):
     def to_string(self):
-        return getchars(gdb.parse_and_eval('nodeToString({})'.format(self.val.reference_value().address)), False)
+        return getchars(gdb.parse_and_eval('bmsToString({})'.format(self.val.reference_value().address)), False)
         # do it by yourself, flowing code is not work, it may cause 'maximum recursion depth exceeded in comparison' error
         # why? anything wrong with my code?
         # if we want run this to debug a core file, must resolve this issue first.
@@ -198,122 +198,7 @@ class BitmapsetPrinter(BasePrinter):
 @register_printer('Relids')
 class RelidsPrinter(BasePrinter):
     def to_string(self):
-        return getchars(gdb.parse_and_eval('nodeToString({})'.format(self.val.referenced_value().address)), False)
-
-pl = {
-    'Alias': Alias,                         'RangeVar': RangeVar,               'TableFunc': TableFunc,             'IntoClause': IntoClause,
-    'Var': Var,                             'Const': Const,                     'Param': Param,                     'Aggref': Aggref,
-    'GroupingFunc': GroupingFunc,           'WindowFunc': WindowFunc,           'SubscriptingRef': SubscriptingRef, 'FuncExpr': FuncExpr,
-    'NamedArgExpr': NamedArgExpr,           'OpExpr': OpExpr,                   'DistinctExpr': DistinctExpr,       'NullIfExpr': NullIfExpr,
-    'FieldStore': FieldStore,               'RelabelType': RelabelType,         'CoerceViaIO': CoerceViaIO,         'ArrayCoerceExpr': ArrayCoerceExpr,
-    'CaseWhen': CaseWhen,                   'CaseTestExpr': CaseTestExpr,       'ArrayExpr': ArrayExpr,             'RowExpr': RowExpr,
-    'RowCompareExpr': RowCompareExpr,       'CoalesceExpr': CoalesceExpr,       'MinMaxExpr': MinMaxExpr,           'SubLink': SubLink,
-    'SQLValueFunction': SQLValueFunction,   'XmlExpr': XmlExpr,                 'JsonFormat': JsonFormat,           'JsonReturning': JsonReturning,                                     'JsonValueExpr': JsonValueExpr,
-    'ScalarArrayOpExpr': ScalarArrayOpExpr,                     'BoolExpr': BoolExpr,                   
-    'ConvertRowtypeExpr': ConvertRowtypeExpr,                   'CollateExpr': CollateExpr,             'CaseExpr': CaseExpr,
-    'JsonConstructorExpr': JsonConstructorExpr,
-    'JsonIsPredicate': JsonIsPredicate,    'NullTest': NullTest,    'BooleanTest': BooleanTest,
-    'SubPlan': SubPlan,             'AlternativeSubPlan': AlternativeSubPlan,                       'FieldSelect': FieldSelect,
-    'CoerceToDomain': CoerceToDomain,    'CoerceToDomainValue': CoerceToDomainValue,    'SetToDefault': SetToDefault,
-    'CurrentOfExpr': CurrentOfExpr,    'NextValueExpr': NextValueExpr,    'InferenceElem': InferenceElem,    'TargetEntry': TargetEntry,
-    'RangeTblRef': RangeTblRef,    'JoinExpr': JoinExpr,    'FromExpr': FromExpr,
-    'OnConflictExpr': OnConflictExpr,
-    'Query': Query,    'TypeName': TypeName,    'ColumnRef': ColumnRef,
-    'ParamRef': ParamRef,    'A_Expr': A_Expr,    'A_Const': A_Const,
-    'TypeCast': TypeCast,    'CollateClause': CollateClause,    'RoleSpec': RoleSpec,    'FuncCall': FuncCall,   
-    'A_Indices': A_Indices,    'A_Indirection': A_Indirection,    'A_ArrayExpr': A_ArrayExpr,
-    'ResTarget': ResTarget,    'MultiAssignRef': MultiAssignRef,    'SortBy': SortBy,    'WindowDef': WindowDef,
-    'RangeSubselect': RangeSubselect,    'RangeFunction': RangeFunction,    'RangeTableFunc': RangeTableFunc,
-    'RangeTableFuncCol': RangeTableFuncCol,    'RangeTableSample': RangeTableSample,    'ColumnDef': ColumnDef,    'TableLikeClause': TableLikeClause,
-    'IndexElem': IndexElem,    'DefElem': DefElem,    'LockingClause': LockingClause,
-    'XmlSerialize': XmlSerialize,    'PartitionElem': PartitionElem,    'PartitionSpec': PartitionSpec,
-    'PartitionBoundSpec': PartitionBoundSpec,    'PartitionRangeDatum': PartitionRangeDatum,
-    'PartitionCmd': PartitionCmd,    'RangeTblEntry': RangeTblEntry,    'RTEPermissionInfo': RTEPermissionInfo,
-    'RangeTblFunction': RangeTblFunction,    'TableSampleClause': TableSampleClause,    'WithCheckOption': WithCheckOption,
-    'SortGroupClause': SortGroupClause,
-    'GroupingSet': GroupingSet,    'WindowClause': WindowClause,    'RowMarkClause': RowMarkClause,
-    'WithClause': WithClause,    'InferClause': InferClause,    'OnConflictClause': OnConflictClause,
-    'CTESearchClause': CTESearchClause,    'CTECycleClause': CTECycleClause,    'CommonTableExpr': CommonTableExpr,
-    'MergeWhenClause': MergeWhenClause,    'MergeAction': MergeAction,    'TriggerTransition': TriggerTransition,
-    'JsonOutput': JsonOutput,    'JsonKeyValue': JsonKeyValue,    'JsonObjectConstructor': JsonObjectConstructor,
-    'JsonArrayConstructor': JsonArrayConstructor,    'JsonArrayQueryConstructor': JsonArrayQueryConstructor,    'JsonAggConstructor': JsonAggConstructor,
-    'JsonObjectAgg': JsonObjectAgg,    'JsonArrayAgg': JsonArrayAgg,    'RawStmt': RawStmt,
-    'InsertStmt': InsertStmt,    'DeleteStmt': DeleteStmt,    'UpdateStmt': UpdateStmt,
-    'MergeStmt': MergeStmt,    'SelectStmt': SelectStmt,    'SetOperationStmt': SetOperationStmt,
-    'ReturnStmt': ReturnStmt,    'PLAssignStmt': PLAssignStmt,    'CreateSchemaStmt': CreateSchemaStmt,
-    'AlterTableStmt': AlterTableStmt,    'ReplicaIdentityStmt': ReplicaIdentityStmt,    'AlterTableCmd': AlterTableCmd,
-    'AlterCollationStmt': AlterCollationStmt,    'AlterDomainStmt': AlterDomainStmt,    'GrantStmt': GrantStmt,
-    'ObjectWithArgs': ObjectWithArgs,    'AccessPriv': AccessPriv,    'GrantRoleStmt': GrantRoleStmt,
-    'AlterDefaultPrivilegesStmt': AlterDefaultPrivilegesStmt,    'CopyStmt': CopyStmt,    'VariableSetStmt': VariableSetStmt,
-    'VariableShowStmt': VariableShowStmt,    'CreateStmt': CreateStmt,    'Constraint': Constraint,
-    'CreateTableSpaceStmt': CreateTableSpaceStmt,    'DropTableSpaceStmt': DropTableSpaceStmt,    'AlterTableSpaceOptionsStmt': AlterTableSpaceOptionsStmt,
-    'AlterTableMoveAllStmt': AlterTableMoveAllStmt,    'CreateExtensionStmt': CreateExtensionStmt,    'AlterExtensionStmt': AlterExtensionStmt,
-    'AlterExtensionContentsStmt': AlterExtensionContentsStmt,    'CreateFdwStmt': CreateFdwStmt,    'AlterFdwStmt': AlterFdwStmt,
-    'CreateForeignServerStmt': CreateForeignServerStmt,    'AlterForeignServerStmt': AlterForeignServerStmt,    'CreateForeignTableStmt': CreateForeignTableStmt,
-    'CreateUserMappingStmt': CreateUserMappingStmt,    'AlterUserMappingStmt': AlterUserMappingStmt,    'DropUserMappingStmt': DropUserMappingStmt,
-    'ImportForeignSchemaStmt': ImportForeignSchemaStmt,    'CreatePolicyStmt': CreatePolicyStmt,    'AlterPolicyStmt': AlterPolicyStmt,
-    'CreateAmStmt': CreateAmStmt,    'CreateTrigStmt': CreateTrigStmt,    'CreateEventTrigStmt': CreateEventTrigStmt,
-    'AlterEventTrigStmt': AlterEventTrigStmt,    'CreatePLangStmt': CreatePLangStmt,    'CreateRoleStmt': CreateRoleStmt,
-    'AlterRoleStmt': AlterRoleStmt,    'AlterRoleSetStmt': AlterRoleSetStmt,    'DropRoleStmt': DropRoleStmt,
-    'CreateSeqStmt': CreateSeqStmt,    'AlterSeqStmt': AlterSeqStmt,    'DefineStmt': DefineStmt,
-    'CreateDomainStmt': CreateDomainStmt,    'CreateOpClassStmt': CreateOpClassStmt,    'CreateOpClassItem': CreateOpClassItem,
-    'CreateOpFamilyStmt': CreateOpFamilyStmt,    'AlterOpFamilyStmt': AlterOpFamilyStmt,    'DropStmt': DropStmt,
-    'TruncateStmt': TruncateStmt,    'CommentStmt': CommentStmt,    'SecLabelStmt': SecLabelStmt,
-    'DeclareCursorStmt': DeclareCursorStmt,    'ClosePortalStmt': ClosePortalStmt,    'FetchStmt': FetchStmt,
-    'IndexStmt': IndexStmt,    'CreateStatsStmt': CreateStatsStmt,    'StatsElem': StatsElem,
-    'AlterStatsStmt': AlterStatsStmt,    'CreateFunctionStmt': CreateFunctionStmt,    'FunctionParameter': FunctionParameter,
-    'AlterFunctionStmt': AlterFunctionStmt,    'DoStmt': DoStmt,    'CallStmt': CallStmt,
-    'RenameStmt': RenameStmt,    'AlterObjectDependsStmt': AlterObjectDependsStmt,    'AlterObjectSchemaStmt': AlterObjectSchemaStmt,
-    'AlterOwnerStmt': AlterOwnerStmt,    'AlterOperatorStmt': AlterOperatorStmt,    'AlterTypeStmt': AlterTypeStmt,
-    'RuleStmt': RuleStmt,    'NotifyStmt': NotifyStmt,    'ListenStmt': ListenStmt,
-    'UnlistenStmt': UnlistenStmt,    'TransactionStmt': TransactionStmt,    'CompositeTypeStmt': CompositeTypeStmt,
-    'CreateEnumStmt': CreateEnumStmt,    'CreateRangeStmt': CreateRangeStmt,    'AlterEnumStmt': AlterEnumStmt,
-    'ViewStmt': ViewStmt,    'LoadStmt': LoadStmt,    'CreatedbStmt': CreatedbStmt,
-    'AlterDatabaseStmt': AlterDatabaseStmt,    'AlterDatabaseRefreshCollStmt': AlterDatabaseRefreshCollStmt,    'AlterDatabaseSetStmt': AlterDatabaseSetStmt,
-    'DropdbStmt': DropdbStmt,    'AlterSystemStmt': AlterSystemStmt,    'ClusterStmt': ClusterStmt,
-    'VacuumStmt': VacuumStmt,
-    'VacuumRelation': VacuumRelation,    'ExplainStmt': ExplainStmt,    'CreateTableAsStmt': CreateTableAsStmt,
-    'RefreshMatViewStmt': RefreshMatViewStmt,     'DiscardStmt': DiscardStmt,
-    'LockStmt': LockStmt,    'ConstraintsSetStmt': ConstraintsSetStmt,    'ReindexStmt': ReindexStmt,
-    'CreateConversionStmt': CreateConversionStmt,    'CreateCastStmt': CreateCastStmt,    'CreateTransformStmt': CreateTransformStmt,
-    'PrepareStmt': PrepareStmt,    'ExecuteStmt': ExecuteStmt,    'DeallocateStmt': DeallocateStmt,
-    'DropOwnedStmt': DropOwnedStmt,    'ReassignOwnedStmt': ReassignOwnedStmt,    'AlterTSDictionaryStmt': AlterTSDictionaryStmt,
-    'AlterTSConfigurationStmt': AlterTSConfigurationStmt,    'PublicationTable': PublicationTable,    'PublicationObjSpec': PublicationObjSpec,
-    'CreatePublicationStmt': CreatePublicationStmt,    'AlterPublicationStmt': AlterPublicationStmt,    'CreateSubscriptionStmt': CreateSubscriptionStmt,
-    'AlterSubscriptionStmt': AlterSubscriptionStmt,    'DropSubscriptionStmt': DropSubscriptionStmt,    'PlannerGlobal': PlannerGlobal,
-    'PlannerInfo': PlannerInfo,    'RelOptInfo': RelOptInfo,
-    'ForeignKeyOptInfo': ForeignKeyOptInfo,    'StatisticExtInfo': StatisticExtInfo,    'JoinDomain': JoinDomain,
-    'EquivalenceClass': EquivalenceClass,    'EquivalenceMember': EquivalenceMember,    'PathKey': PathKey,    'PathTarget': PathTarget,    'ParamPathInfo': ParamPathInfo,
-    'RestrictInfo': RestrictInfo,    'PlaceHolderVar': PlaceHolderVar,    'SpecialJoinInfo': SpecialJoinInfo,
-    'OuterJoinClauseInfo': OuterJoinClauseInfo,    'AppendRelInfo': AppendRelInfo,    'RowIdentityVarInfo': RowIdentityVarInfo,
-    'PlaceHolderInfo': PlaceHolderInfo,    'MinMaxAggInfo': MinMaxAggInfo,    'NestLoopParam': NestLoopParam,
-    'PlannerParamItem': PlannerParamItem,    'AggInfo': AggInfo,    'AggTransInfo': AggTransInfo,
-    'PlannedStmt': PlannedStmt,    'PlanRowMark': PlanRowMark,    'PartitionPruneInfo': PartitionPruneInfo,
-    'PartitionedRelPruneInfo': PartitionedRelPruneInfo,    'PartitionPruneStep': PartitionPruneStep,    'PartitionPruneStepOp': PartitionPruneStepOp,
-    'PartitionPruneStepCombine': PartitionPruneStepCombine,    'PlanInvalItem': PlanInvalItem,    'ExtensibleNode': ExtensibleNode,
-    'ForeignKeyCacheInfo': ForeignKeyCacheInfo, 'IndexOptInfo': IndexOptInfo,
-
-    # path
-    'Path': Path,    'IndexPath': IndexPath,    'BitmapHeapPath': BitmapHeapPath,    'BitmapAndPath': BitmapAndPath,    'BitmapOrPath': BitmapOrPath,
-    'TidPath': TidPath,    'SubqueryScanPath': SubqueryScanPath,    'ForeignPath': ForeignPath,    'CustomPath': CustomPath,
-    'AppendPath': AppendPath,    'MergeAppendPath': MergeAppendPath,    'GroupResultPath': GroupResultPath,    'MaterialPath': MaterialPath,
-    'UniquePath': UniquePath,    'GatherPath': GatherPath,    'GatherMergePath': GatherMergePath,    'ProjectionPath': ProjectionPath,
-    'ProjectSetPath': ProjectSetPath,    'SortPath': SortPath,    'GroupPath': GroupPath,    'UpperUniquePath': UpperUniquePath,
-    'AggPath': AggPath,    'GroupingSetsPath': GroupingSetsPath,    'MinMaxAggPath': MinMaxAggPath,    'WindowAggPath': WindowAggPath,
-    'SetOpPath': SetOpPath,    'RecursiveUnionPath': RecursiveUnionPath,    'LockRowsPath': LockRowsPath,    'ModifyTablePath': ModifyTablePath,
-    'LimitPath': LimitPath,    'MergePath': MergePath,    'HashPath': HashPath, 'JoinPath': JoinPath,  'NestPath': NestPath,
-
-    # plan
-    'Plan': Plan,    'Result': Result,    'ProjectSet': ProjectSet,    'ModifyTable': ModifyTable,    'Append': Append,    'MergeAppend': MergeAppend,
-    'RecursiveUnion': RecursiveUnion,    'BitmapAnd': BitmapAnd,    'BitmapOr': BitmapOr,    'Scan': Scan,    'SeqScan': SeqScan,    'SampleScan': SampleScan,
-    'IndexScan': IndexScan,    'IndexOnlyScan': IndexOnlyScan,    'BitmapIndexScan': BitmapIndexScan,    'BitmapHeapScan': BitmapHeapScan,
-    'TidScan': TidScan,    'TidRangeScan': TidRangeScan,    'SubqueryScan': SubqueryScan,    'FunctionScan': FunctionScan,
-    'ValuesScan': ValuesScan,    'TableFuncScan': TableFuncScan,    'CteScan': CteScan,    'NamedTuplestoreScan': NamedTuplestoreScan,
-    'WorkTableScan': WorkTableScan,    'ForeignScan': ForeignScan,    'CustomScan': CustomScan,    'Material': Material,
-    'Memoize': Memoize,    'Sort': Sort,    'Group': Group,    'Agg': Agg,    'WindowAgg': WindowAgg,
-    'Unique': Unique,    'Gather': Gather,    'GatherMerge': GatherMerge,    'Hash': Hash,    'SetOp': SetOp,
-    'LockRows': LockRows,    'Limit': Limit,    'NestLoop': NestLoop,    'MergeJoin': MergeJoin,    'HashJoin': HashJoin,
-}
+        return getchars(gdb.parse_and_eval('bmsToString({})'.format(self.val.referenced_value().address)), False)
 
 def split_field(s):
     pod_item = []
@@ -421,9 +306,11 @@ class ValUnionPrinter(BasePrinter):
         return '{} [ {} ]'.format(vt, ret)
 
 def generate_printer():
-    for name, s in pl.items():
-        pointerx = gen_printer_class(name, split_field(s))
-        printer.add_printer(name, '^' + name + '$', pointerx)
+    for node in dir(node_struct):
+        if not node.startswith('__'):
+            struct = getattr(node_struct, node)
+            pointerx = gen_printer_class(node, split_field(struct))
+            printer.add_printer(node, '^' + node + '$', pointerx)
     for name in val_printer:
         pointerx = gen_val_printer_class(name)
         printer.add_printer(name, '^' + name + '$', pointerx)
