@@ -2,32 +2,25 @@ import gdb
 import string
 import re
 from functools import reduce
-import operator
+import platform
 
-from . import node_struct
-
-printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_16_STABLE')
+printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_17_BETA1')
 
 def register_printer(name):
     def __registe(_printer):
         printer.add_printer(name, '^' + name + '$', _printer)
     return __registe
 
-def getTypeOutputInfo(t_oid):
-    tupe = gdb.parse_and_eval('SearchSysCache1(TYPEOID, {})'.format(t_oid))
-    tp = gdb.parse_and_eval('(Form_pg_type){}'.format(int(tupe['t_data']) + int(tupe['t_data']['t_hoff'])))
-    gdb.parse_and_eval('ReleaseSysCache({})'.format(tupe.dereference().address))
-    return [int(tp['typoutput']), (not bool(tp['typbyval'])) and int(tp['typlen']) == -1]
-
-def cast(node, type_name):
+def cast2ptr(node, type_name):
     t = gdb.lookup_type(type_name)
     return node.cast(t.pointer())
 
-def list_length(node):
-    return int(node['length'])
+class Printer:
+    def __init__(self, val) -> None:
+        self.val = val
 
-def cast_to_pod(node, type):
-    return node.cast(gdb.lookup_type(type))
+    def node_type(self):
+        return str(self.val['type'])[2:]
 
 # max print 100
 def getchars(arg, quote = True, length = 100):
@@ -52,137 +45,37 @@ def getchars(arg, quote = True, length = 100):
 
     return retval
 
-class BasePrinter:
-    def __init__(self, val) -> None:
-        self.val = val
-
-    def get_item(self, field):
-        f = field.split('.')
-        return reduce(operator.getitem, f, self.val)
-
-    def print_to_string(self, header, field):
-        if len(field) == 0:
-            return header
-        head = header
-        if re.search('path\.', field[0][1]):
-            f = field[0][1].split('.')[:-1]
-            head += self.path_to_string(reduce(operator.getitem, f, self.val)) + ' '
-            field = [x for x in field if not re.search('path\.', x[1])]
-        elif re.search('plan\.', field[0][1]):
-            f = field[0][1].split('.')[:-1]
-            head += self.plan_to_string(reduce(operator.getitem, f, self.val)) + ' '
-            field = [x for x in field if not re.search('plan\.', x[1])]
-
-        size = len(field)
-        if size > 1:
-            head += '{'
-
-        ss = []
-        for arg in field:
-            if arg[0] == 'QualCost':
-                s = '{}: ({:.2f}..{:.2f})'.format(arg[1], float(self.get_item(arg[1])['startup']), float(self.get_item(arg[1])['per_tuple']))
-            elif arg[0] == 'Bitmapset*':
-                s = '%s: %s' % (arg[1], '0x0' if str(self.get_item(arg[1])) == '0x0' else self.get_item(arg[1]).dereference())
-            elif arg[0] == 'Selectivity':
-                s = '{}: {:.4f}'.format(arg[1], float(self.get_item(arg[1])))
-            else:
-                s = '{}: {}'.format(arg[1], getchars(self.get_item(arg[1])) if arg[0] == 'char*' else self.get_item(arg[1]))
-            ss.append(s)
-
-        head += ', '.join(ss)
-
-        if size > 1:
-            head += '}'
-
-        return head
-    
-    def add_to_list(self, list, arg):
-        k = arg.split('.')
-        v = reduce(operator.getitem, k, self.val)
-        if str(v) != '0x0':
-            if re.search('^parent$', k[-1]):
-                list += [(arg, v['relids'])]
-            else:
-                list += [(arg, v.dereference())]
-
-    def print_children(self, field):
-        list = []
-        for arg in field:
-            self.add_to_list(list, arg[1])
-        return list
-    
-    def print_children_array(self, k, v):
-        list = []
-        size = 0
-        if k[0:11] == 'list_length':
-            val = self.val[str(k[k.index('(') + 1 : k.index(')')])]
-            if str(val) != '0x0':
-                size = int(list_length(val))
-        else:
-            size = int(self.get_item(k)) 
-
-        if size != 0:
-            for arg in v:
-                a_type = arg[0].split('[')[0]
-                if str(self.get_item(arg[1])) != '0x0':
-                    if a_type == 'bool':
-                        list.append((arg[1], str([bool(self.get_item(arg[1])[i]) for i in range(size)])))
-                    # if a_type in ['AttrNumber', 'Index', 'Oid', 'int']:
-                    else:
-                        list.append((arg[1], str([int(self.get_item(arg[1])[i]) for i in range(size)])))
-        return list
-
-    def plan_to_string(self, plan):
-        return '(cost={:.2f}..{:.2f} rows={:.0f} width={:.0f} async_capable={} plan_id={} parallel_aware={} parallel_safe = {})'.format(
-            float(plan['startup_cost']),
-            float(plan['total_cost']),
-            float(plan['plan_rows']),
-            float(plan['plan_width']),
-            int(plan['async_capable']),
-            int(plan['plan_node_id']),
-            bool(plan['parallel_aware']),
-            bool(plan['parallel_safe'])
-        )
-    
-    def path_to_string(self, path):
-        return '{} (cost={:.2f}..{:.2f} rows={:.0f} parallel_aware={} parallel_safe={} parallel_workers={})'.format(
-            path['pathtype'],
-            float(path['startup_cost']),
-            float(path['total_cost']),
-            float(path['rows']),
-            bool(path['parallel_aware']),
-            bool(path['parallel_safe']),
-            int(path['parallel_workers']),
-        )
-
-    def display_hint(self):
-        return ''
-
-def bms_next_member(val, prevbit, bit_per_w):
-    if str(val) == '0x0':
-        return -2
-
-    nwords = val['nwords']
-    prevbit += 1
-    mm = 0
-    if bit_per_w == 64:
-        mm = 0xFFFFFFFFFFFFFFFF
-    else:
-        mm = 0xFFFFFFFF
-
-    mask = (mm << int(prevbit % bit_per_w)) & mm
-
-    for wordnum in range(prevbit // bit_per_w, nwords):
-        w = int(val['words'][wordnum] & mask)
-        if w != 0:
-            return int(wordnum * bit_per_w + w.bit_length() - len(bin(w).rstrip('0')) + 2)
-        mask = mm
-    return -2
 
 @register_printer('Bitmapset')
-class BitmapsetPrinter(BasePrinter):
+class BitmapsetPrinter(Printer):
+    def bms_next_member(self, prevbit, bit_per_w):
+        if str(self.val) == '0x0':
+            return -2
+
+        nwords = self.val['nwords']
+        prevbit += 1
+        mm = 0
+        if bit_per_w == 64:
+            mm = 0xFFFFFFFFFFFFFFFF
+        else:
+            mm = 0xFFFFFFFF
+
+        mask = (mm << int(prevbit % bit_per_w)) & mm
+
+        for wordnum in range(prevbit // bit_per_w, nwords):
+            w = int(self.val['words'][wordnum] & mask)
+            if w != 0:
+                return int(wordnum * bit_per_w + w.bit_length() - len(bin(w).rstrip('0')) + 2)
+            mask = mm
+        return -2
+
     def to_string(self):
-        return getchars(gdb.parse_and_eval('bmsToString({})'.format(self.val.reference_value().address)), False)
+        # no print now
+        return 'xx'
+        # try:
+        #     return getchars(gdb.parse_and_eval('bmsToString({})'.format(self.val.address)), False)
+        # except gdb.error:
+        #     return self.val
         # do it by yourself, flowing code is not work, it may cause 'maximum recursion depth exceeded in comparison' error
         # why? anything wrong with my code?
         # if we want run this to debug a core file, must resolve this issue first.
@@ -195,169 +88,68 @@ class BitmapsetPrinter(BasePrinter):
 
         return str(list)
 
-@register_printer('Relids')
-class RelidsPrinter(BasePrinter):
-    def to_string(self):
-        return getchars(gdb.parse_and_eval('bmsToString({})'.format(self.val.referenced_value().address)), False)
 
-def split_field(s):
-    pod_item = []
-    pointer_item = []
-    array_item = []
-
-    for key, val in s:
-        if re.search('\[', key):
-            array_item.append([key, val])
-        elif re.search('\*', key) and key != 'char*' and key != 'Bitmapset*':
-            pointer_item.append([key, val])
-        else:
-            pod_item.append([key, val])
-
-    return [pod_item, pointer_item, array_item]
-
-def node_type(node):
-    return str(node['type'])[2:]
-
-def gen_printer_class(name, fields):
-    class Printer(BasePrinter):
-        def to_string(self):
-            if name == 'Path':
-                if node_type(self.val) == 'Path':
-                    return self.path_to_string(self.val)
-                else:
-                    return cast(self.val.address, node_type(self.val)).dereference()
-            elif name == 'Plan':
-                return cast(self.val.address, node_type(self.val)).dereference()
-            else:
-                return self.print_to_string('%s ' % name, fields[0])
-
-        def children(self):
-            list = []
-            if name == 'Path':
-                if node_type(self.val) != 'Path':
-                    return []
-            elif name == 'Plan':
-                return []
-            if len(fields[2]) != 0:
-                result = {}
-                for t in fields[2]:
-                    key = t[0][t[0].index('[') + 1 : t[0].index(']')]
-                    if key in result:
-                        result[key].append(t)
-                    else:
-                        result[key] = [t]
-
-                for k, v in result.items():
-                    list += self.print_children_array(k, v)
-
-            return list + self.print_children(fields[1])
-
-    Printer.__name__ = name
-    return Printer
-
-@register_printer('(Node|Expr)')
-class CommonPrinter(BasePrinter):
-    def to_string(self):
-        self.type = node_type(self.val)
-        return cast(self.val.address, self.type).dereference()
 
 @register_printer('A_Star')
-class A_StarPrinter(BasePrinter):
+class A_StarPrinter(Printer):
     def to_string(self):
         return '*'
 
-def gen_val_printer_class(name):
-    class Printer(BasePrinter):
-        def to_string(self):
-            vt = node_type(self.val)
-            ret = ''
-            if vt == 'Integer':
-                ret += str(self.val['ival'])
-            elif vt == 'Boolean':
-                ret += bool(self.val['boolval'])
-            elif vt == 'Float':
-                ret += getchars(self.val['fval'])
-            elif vt == 'String':
-                ret += getchars(self.val['sval'])
-            elif vt == 'BitString':
-                ret += getchars(self.val['bsval'])
-            return '{} [ {} ]'.format(vt, ret)
-
-    Printer.__name__ = name
-    return Printer
-
-val_printer = ['Integer', 'Boolean', 'Float', 'String', 'BitString']
-
-@register_printer('ValUnion')
-class ValUnionPrinter(BasePrinter):
+@register_printer('QualCost')
+class QualCostPrinter(Printer):
     def to_string(self):
-        vt = str(self.val['node']['type'])[2:]
+        return '{{{:.2f}..{:.2f}}}'.format(float(self.val['startup']), float(self.val['per_tuple']))
+
+
+@register_printer('A_Const')
+class A_ConstPrinter(Printer):
+    def to_string(self):
+        if bool(self.val['isnull']):
+            return ''
+        vt = str(self.val['val']['node']['type'])[2:]
         ret = ''
         if vt == 'Integer':
-            ret += str(self.val['ival']['ival'])
+            ret += str(self.val['val']['ival']['ival'])
         elif vt == 'Float':
-            ret += getchars(self.val['fval']['fval'])
+            ret += getchars(self.val['val']['fval']['fval'])
         elif vt == 'Boolean':
-            ret += str(self.val['boolval']['boolval'])
+            ret += str(self.val['val']['boolval']['boolval'])
         elif vt == 'BitString':
-            ret += getchars(self.val['bsval']['bsval'])
+            ret += getchars(self.val['val']['bsval']['bsval'])
         elif vt == 'String':
-            ret += getchars(self.val['sval']['sval'])
-        return '{} [ {} ]'.format(vt, ret)
-
-def generate_printer():
-    for node in dir(node_struct):
-        if not node.startswith('__'):
-            struct = getattr(node_struct, node)
-            pointerx = gen_printer_class(node, split_field(struct))
-            printer.add_printer(node, '^' + node + '$', pointerx)
-    for name in val_printer:
-        pointerx = gen_val_printer_class(name)
-        printer.add_printer(name, '^' + name + '$', pointerx)
-
-generate_printer()
-
-
-class ListIt(object):
-    def __init__(self, list) -> None:
-        self.elements = list['elements']
-        self.size = list['length']
-        self.count = 0
-
-    def __iter__(self):
-        return self
-
-    def __len__(self):
-        return int(self.size)
-
-    def __next__(self):
-        if self.count == self.size:
-            raise StopIteration
-
-        node = self.elements[self.count]
-        self.count += 1
-        return node
-
+            ret += getchars(self.val['val']['sval']['sval'])
+        return '{} {{ {} }}'.format(vt, ret)
 
 @register_printer('List')
 class ListPrinter:
     class _iter(object):
-        def __init__(self, it, type) -> None:
-            self.it = it
+
+        def __init__(self, type, list) -> None:
             self.type = type
+            self.list = list
+            self.size = list['length']
             self.count = 0
 
         def __iter__(self):
             return self
 
         def __next__(self):
-            node = next(self.it)
+            if self.count == self.size:
+                raise StopIteration
+            node = self.list['elements'][self.count]
+
             if str(self.type) == 'List':
-                node = cast(node['ptr_value'], 'Node').dereference()
+                type = cast2ptr(node['ptr_value'], 'Node')['type']
+                if int(type) > 0 and int(type) < gdb.parse_and_eval('(int) T_WindowObjectData'):
+                    node = cast2ptr(node, str(type)[2:]).dereference()
+                else:
+                    node = node['ptr_value']
             elif str(self.type) == 'IntList':
                 node = int(node['int_value'])
-            else:
+            elif str(self.type) == 'OidList':
                 node = int(node['oid_value'])
+            else:
+                node = node['xid_value']
 
             result = (str(self.count), node)
             self.count += 1
@@ -371,7 +163,7 @@ class ListPrinter:
         return '%s with %s elements' % (self.type, self.val['length'])
 
     def children(self):
-        return self._iter(ListIt(self.val), self.type)
+        return self._iter(self.type, self.val)
 
     def display_hint(self):
         if self.type == 'List':
@@ -379,63 +171,435 @@ class ListPrinter:
         else:
             return 'array'
 
+class PrinterGenerator:
+    def __init__(self, val) -> None:
+        self.val = val
+        self.not_printable = ['type', 'xpr', 'parent_root', 'simple_rte_array',
+                              'append_rel_array', 'join_rel_hash', 'join_rel_level',
+                              'placeholder_array', 'placeholder_array_size', 'part_schemes',
+                              'initial_rels', 'upper_rels', 'upper_targets', 'grouping_map', 'planner_cxt', 'isAltSubplan', 'isUsedSubplan',
+                              'join_search_private', 'boundParams', 'subroots', 'partition_directory', 'attr_needed', 'attr_widths',
+                              'fdwroutine', 'fdw_private', 'parent', 'top_parent', 'part_scheme', 'boundinfo', 'part_rels',
+                              'partexprs', 'nullable_partexprs', 'rel', 'opclassoptions', 'indexprs', 'amcostestimate', 'em_parent',
+                              'parent_ec', 'left_ec', 'right_ec', 'scansel_cache', 'initValue', 'location',
 
+                              'simple_rel_array', 'simple_rel_array_size', 'sortgrouprefs',
+                              'sortColIdx', 'sortOperators', 'collations', 'nullsFirst',    # Sort
+                              'dupColIdx', 'dupOperators', 'dupCollations',                 # RecursiveUnion
+                              'mergeFamilies', 'mergeCollations', 'mergeStrategies', 'mergeNullsFirst',  # MergeJoin
+                              'hashOperators', # Memoize
+                              'grpColIdx','grpOperators','grpCollations',  # Group
+                              ]
 
-# @register_printer('Const')
-# class ConstPrinter(BasePrinter):
-#     def to_string(self):
-#         if bool(self.val['constisnull']) == True:
-#             return 'Null'
-#         else:
-#             pfunc = getTypeOutputInfo(int(self.val['consttype']))
-#             return str(gdb.parse_and_eval('OidOutputFunctionCall({}, {})'.format(pfunc[0], int(self.val['constvalue']))).dereference())
+    def is_target_type(self, val, type):
+        try:
+            val[type]
+            return True
+        except gdb.error:
+            return False
+        
+    def get_type(self, val):
+        if self.is_target_type(val, 'type'):
+            return str(val['type'])[2:]
+        elif self.is_target_type(val, 'xpr'):
+            return str(val['xpr']['type'])[2:]
+        elif self.is_target_type(val, 'path'):
+            return str(val['path']['type'])[2:]
+        elif self.is_target_type(val, 'plan'):
+            return str(val['plan']['type'])[2:]
+        elif self.is_target_type(val, 'jpath'):
+            return str(val['jpath']['path']['type'])[2:]
+        elif self.is_target_type(val, 'sort'):
+            return str(val['sort']['plan']['type'])[2:]
+        elif self.is_target_type(val, 'join'):
+            return str(val['join']['plan']['type'])[2:]
+        elif self.is_target_type(val, 'scan'):
+            return str(val['scan']['plan']['type'])[2:]
 
-class Printer(BasePrinter):
+        return None
+
+    def printable(self, name):
+        return name not in self.not_printable
+
+    def get_convertable_type(self, type):
+        if type in ['OidList', 'IntList', 'XidList']:
+            return 'List'
+
+        return None
+
+class PathPrinterGenerator(PrinterGenerator):
+    def __init__(self, val) -> None:
+        super().__init__(val)
+        self.type = self.get_type(self.val)
+        self.basic_path = self.val.cast(gdb.lookup_type('Path'))
+        self.actually_path = str(self.basic_path['pathtype'])[2:]
+        self.extend_path = self.val.cast(gdb.lookup_type(self.type))
+
+    def path_to_string(self):
+        path = self.basic_path
+        return '(cost: {:.2f}..{:.2f} rows: {:.0f} parallel{{aware: {} safe: {} workers: {}}}) parent: {}'.format(
+                        float(path['startup_cost']), float(path['total_cost']), float(path['rows']),
+                        bool(path['parallel_aware']), bool(path['parallel_safe']), int(path['parallel_workers']),
+                        '0x0' if path['parent']['relids'] == 0 else path['parent']['relids'].dereference())
+
+    def path_children(self):
+        path = self.basic_path
+        fields = []
+        if path['parent']['reltarget'] != 0 and path['pathtarget'] != 0 and path['parent']['reltarget'] != path['pathtarget']:
+            fields.append(('reltarget', path['pathtarget'].dereference()))
+
+        if path['param_info']:
+            fields.append(('param_info', path['param_info']['ppi_req_outer'].dereference()))
+
+        if path['pathkeys']:
+            fields.append(('pathkeys', path['pathkeys'].dereference()))
+
+        return fields
+
+    def common_to_string(self):
+        if self.type == 'Path':
+            return self.actually_path + ' ' + self.path_to_string()
+        else:
+            fields = []
+            for field in self.extend_path.type.fields():
+                if self.printable(field.name):
+
+                    # print path field
+                    if field.name == 'path' or field.name == 'jpath':
+                        fields.append(self.path_to_string())
+                        if field.name == 'jpath':
+                            fields.append('{}: {}'.format('jointype', self.extend_path[field.name]['jointype']))
+                            fields.append('{}: {}'.format('inner_unique', self.extend_path[field.name]['inner_unique']))
+                        continue
+
+                    # print no pointer field
+                    if field.type.code != gdb.TYPE_CODE_PTR:
+                        fields.append('{}: {}'.format(field.name, self.extend_path[field.name]))
+
+                    # print char * field
+                    if field.type.code == gdb.TYPE_CODE_PTR and self.extend_path[field.name] != 0 and str(field.type) == 'char *':
+                        fields.append('{}: {}'.format(field.name, getchars(self.extend_path[field.name])))
+        
+            return self.actually_path + ' {' + ', '.join(fields) + '}'
+    
+    def common_children(self):
+        if self.type == 'Path':
+            for i in self.path_children():
+                yield i
+        else:
+            for field in self.extend_path.type.fields():
+                if self.printable(field.name):
+                    if field.name == 'path' or field.name == 'jpath':
+                        for i in self.path_children():
+                            yield i
+                        if field.name == 'jpath':
+                            outer_type = self.get_type(self.extend_path[field.name]['outerjoinpath'])
+                            inner_type = self.get_type(self.extend_path[field.name]['innerjoinpath'])
+                            yield ('outerjoinpath', cast2ptr(self.extend_path[field.name]['outerjoinpath'], outer_type).dereference())
+                            yield ('innerjoinpath', cast2ptr(self.extend_path[field.name]['innerjoinpath'], inner_type).dereference())
+                            if self.extend_path[field.name]['joinrestrictinfo'] != 0:
+                                yield ('joinrestrictinfo', self.extend_path[field.name]['joinrestrictinfo'].dereference())
+                        continue
+                    
+                    # char * printed in common_to_string
+                    if str(field.type) != 'char *' and self.extend_path[field.name] != 0 :
+
+                        # Relids is def of Bitmapset *, print it
+                        if field.type.code == gdb.TYPE_CODE_PTR or str(field.type) == 'Relids':
+
+                            #  get type and convert it
+                            type = self.get_type(self.extend_path[field.name])
+
+                            # convert to base type
+                            base_type = self.get_convertable_type(type)
+                            if base_type:
+                                yield (field.name, cast2ptr(self.extend_path[field.name], base_type).dereference())
+                            else:
+                                yield (field.name, self.extend_path[field.name].dereference())
+
+class PlanPrinterGenerator(PrinterGenerator):
+    def __init__(self, val) -> None:
+        super().__init__(val)
+        self.type = self.get_type(self.val)
+        self.basic_plan = self.val.cast(gdb.lookup_type('Plan'))
+        self.extend_plan = self.val.cast(gdb.lookup_type(self.type))
+        self.array_filed = []
+
+        if self.type in ['MergeAppend', 'Sort']:
+            self.print_sort(self.extend_plan)
+        elif self.type == 'RecursiveUnion':
+            self.print_RecursiveUnion_array(self.extend_plan)
+        elif self.type == 'Memoize':
+            self.print_Memoize_array(self.extend_plan)
+        elif self.type in ['Group', 'Agg']:
+            self.print_Group_array(self.extend_plan)
+        elif self.type == 'MergeJoin':
+            self.print_MergeJoin_array(self.extend_plan)
+
+    def plan_to_string(self):
+        plan = self.basic_plan
+        return '(cost: {:.2f}..{:.2f} rows: {:.0f} width: {} parallel{{aware: {} safe: {}}}) async_capable: {} node_id: {}'.format(
+                        float(plan['startup_cost']), float(plan['total_cost']), float(plan['plan_rows']), int(plan['plan_width']),
+                        bool(plan['parallel_aware']), bool(plan['parallel_safe']), bool(plan['async_capable']), int(plan['plan_node_id']))
+
+    def plan_children(self):
+        plan = self.basic_plan
+        fields = []
+
+        if plan['targetlist']:
+            fields.append(('targetlist', plan['targetlist'].dereference()))
+        if plan['qual']:
+            fields.append(('qual', plan['qual'].dereference()))
+        if plan['lefttree']:
+            outer_type = self.get_type(plan['lefttree'])
+            fields.append(('lefttree', cast2ptr(plan['lefttree'], outer_type).dereference()))
+        if plan['righttree']:
+            inner_type = self.get_type(plan['righttree'])
+            fields.append(('righttree', cast2ptr(plan['righttree'], inner_type).dereference()))
+        if plan['extParam']:
+            fields.append(('extParam', plan['extParam'].dereference()))
+        if plan['allParam']:
+            fields.append(('allParam', plan['allParam'].dereference()))
+
+        return fields
+
+    def get_array(self, val, keys, numCols):
+        slist = []
+        if numCols > 0:
+            values = ([int(val[key][i]) for i in range(numCols)] for key in keys)
+            for key, value in zip(keys, values):
+                slist.append((key, str(value)))
+        return slist
+
+    def print_sort(self, val):
+        numCols = int(val['numCols'])
+        self.array_filed = self.get_array(val, ['sortColIdx','sortOperators', 'collations', 'nullsFirst'], numCols)
+    
+    def print_RecursiveUnion_array(self, val):
+        numCols = int(val['numCols'])
+        self.array_filed = self.get_array(val, ['dupColIdx', 'dupOperators', 'dupCollations'], numCols)
+
+    def print_Memoize_array(self, val):
+        numCols = int(val['numKeys'])
+        self.array_filed = self.get_array(val, ['hashOperators', 'collations'], numCols)
+    
+    def print_Group_array(self, val):
+        numCols = int(val['numCols'])
+        self.array_filed = self.get_array(val, ['grpColIdx', 'grpOperators', 'grpCollations'], numCols)
+
+    def print_MergeJoin_array(self, val):
+        numCols = int(val['mergeclauses']['length'])
+        self.array_filed = self.get_array(val, ['mergeFamilies','mergeCollations','mergeStrategies', 'mergeNullsFirst'], numCols)
+
+    def common_to_string(self):
+        fields = []
+        for field in self.extend_plan.type.fields():
+            if self.printable(field.name):
+
+                # print plan field
+                if field.name == 'plan' or field.name == 'scan' or field.name == 'sort' or field.name == 'join':
+                    fields.append(self.plan_to_string())
+                    if field.name == 'scan':
+                        fields.append('{}: {}'.format('scanrelid', self.extend_plan[field.name]['scanrelid']))
+
+                    elif field.name == 'join':
+                        fields.append('{}: {}'.format('jointype', self.extend_plan[field.name]['jointype']))
+                        fields.append('{}: {}'.format('inner_unique', self.extend_plan[field.name]['inner_unique']))
+
+                # print no pointer field
+                elif field.type.code != gdb.TYPE_CODE_PTR:
+                    fields.append('{}: {}'.format(field.name, self.extend_plan[field.name]))
+
+                # print char * field
+                elif field.type.code == gdb.TYPE_CODE_PTR and self.extend_plan[field.name] != 0 and str(field.type) == 'char *':
+                    fields.append('{}: {}'.format(field.name, getchars(self.extend_plan[field.name])))
+
+        return self.type + ' {' + ', '.join(fields) + '}'
+
+    def common_children(self):
+        if self.type == 'Sort':
+            for i in self.plan_children():
+                yield i
+            for i in self.array_filed:
+                yield i
+        else:
+            for field in self.extend_plan.type.fields():
+                if self.printable(field.name):
+                    if field.name in ['plan', 'scan', 'sort', 'join']:
+                        for i in self.plan_children():
+                            yield i
+                        if field.name == 'sort':
+                            sort = self.extend_plan['sort']
+                            for i in self.print_sort(sort):
+                                yield i
+
+                        if field.name == 'join' and self.extend_plan[field.name]['joinqual']:
+                            yield ('joinqual', self.extend_plan[field.name]['joinqual'].dereference())
+
+                    # char * printed in common_to_string
+                    elif str(field.type) != 'char *' and self.extend_plan[field.name] != 0 :
+
+                        # Relids is def of Bitmapset *, print it
+                        if field.type.code == gdb.TYPE_CODE_PTR or str(field.type) == 'Relids':
+
+                            #  get type and convert it
+                            type = self.get_type(self.extend_plan[field.name])
+
+                            # convert to base type
+                            base_type = self.get_convertable_type(type)
+                            if base_type:
+                                yield (field.name, cast2ptr(self.extend_plan[field.name], base_type).dereference())
+                            else:
+                                yield (field.name, self.extend_plan[field.name].dereference())
+
+            if self.type in ['RecursiveUnion', 'Memoize', 'Group', 'Agg', 'MergeJoin']:
+                for i in self.array_filed:
+                    yield i
+
+@register_printer('(Node|Expr)')
+class CommonPrinter(Printer):
     def to_string(self):
-        return getchars(gdb.parse_and_eval('pretty_format_node_dump(nodeToString({}))'.format(self.val.reference_value().address)), False, 100000000)
-            
-printer.add_printer('AnyNode', '^Node$', Printer)
+        self.type = self.node_type()
+        return cast2ptr(self.val.address, self.type).dereference()
 
-class printVerbose(gdb.Parameter):
+# printer for basic object
+class NodePrinterGnerator(PrinterGenerator):
+    def common_to_string(self):
+        fields = []
+        node = self.get_type(self.val)
+
+        for field in self.val.type.fields():
+            if self.printable(field.name):
+
+                # Relids is def of Bitmapset *
+                if str(field.type) == 'Relids':
+                    continue
+
+                # print no pointer field
+                if field.type.code != gdb.TYPE_CODE_PTR:
+                    fields.append('{}: {}'.format(field.name, self.val[field.name]))
+
+                # print char * field
+                if field.type.code == gdb.TYPE_CODE_PTR and self.val[field.name] != 0 and str(field.type) == 'char *':
+                    fields.append('{}: {}'.format(field.name, getchars(self.val[field.name])))
+        
+        #  no printable fields
+        if len(fields) == 0:
+            return None
+        return node + ' {' + ', '.join(fields) + '}'
+
+    def common_children(self):
+        for field in self.val.type.fields():
+            if self.printable(field.name):
+                # char * printed in common_to_string
+                if str(field.type) != 'char *':
+
+                    # Relids is def of Bitmapset *, print it
+                    if str(field.type) == 'Relids' and self.val[field.name] != 0:
+                        yield (field.name, cast2ptr(self.val[field.name], 'Bitmapset').dereference())
+
+                    elif field.type.code == gdb.TYPE_CODE_PTR and self.val[field.name] != 0:
+
+                        #  get type and convert it
+                        type = self.get_type(self.val[field.name])
+
+                        # convert to base type
+                        base_type = self.get_convertable_type(type)
+                        if base_type:
+                            yield (field.name, cast2ptr(self.val[field.name], base_type).dereference())
+                        else:
+                            yield (field.name, self.val[field.name].dereference())
+
+class Gnerator:
     def __init__(self) -> None:
-        super(printVerbose, self).__init__('print pg_pretty', gdb.COMMAND_DATA, gdb.PARAM_ENUM, ['off', 'origin', 'trace', 'info'])
-        self.value = 'trace'
+        self.printer_nodes = [
+            'Alias',              'RangeVar',             'TableFunc',        'IntoClause',            'Var',
+            'Const',              'Param',            'Aggref',               'GroupingFunc',         'WindowFunc',         'WindowFuncRunCondition',
+            'MergeSupportFunc',   'SubscriptingRef', 'FuncExpr',  'NamedArgExpr',   'OpExpr',  'DistinctExpr',   'NullIfExpr',  'ScalarArrayOpExpr',  'BoolExpr',   'SubLink',
+            'SubPlan',            'AlternativeSubPlan',           'FieldSelect',      'FieldStore',           'RelabelType',         'CoerceViaIO',         'ArrayCoerceExpr',     'ConvertRowtypeExpr',        'CollateExpr',
+            'CaseExpr',           'CaseWhen',         'CaseTestExpr',     'ArrayExpr',       'RowExpr',        'RowCompareExpr',         'CoalesceExpr',
+            'MinMaxExpr',         'SQLValueFunction',         'XmlExpr',      'JsonFormat',        'JsonReturning',        'JsonValueExpr',
+            'JsonConstructorExpr',    'JsonIsPredicate',  'JsonBehavior',   'JsonExpr',    'JsonTablePath',    'JsonTablePathScan',    'JsonTableSiblingJoin', 'NullTest',
+            'BooleanTest',        'MergeAction',      'CoerceToDomain',   'CoerceToDomainValue',    'SetToDefault',      'CurrentOfExpr',      'NextValueExpr',      'InferenceElem',
+            'TargetEntry',        'RangeTblRef',      'JoinExpr',     'FromExpr',       'OnConflictExpr',      'Query',       'TypeName',     'ColumnRef',
+            'ParamRef',           'A_Expr',                 'TypeCast',        'CollateClause',    'RoleSpec',      'FuncCall',        'A_Indices',
+            'A_Indirection',      'A_ArrayExpr',      'ResTarget',      'MultiAssignRef',     'SortBy',     'WindowDef',   'RangeSubselect',    'RangeFunction',   'RangeTableFunc',
+            'RangeTableFuncCol',  'RangeTableSample',   'ColumnDef',   'TableLikeClause', 'IndexElem', 'DefElem',   'LockingClause',
+            'XmlSerialize',       'PartitionElem',    'PartitionSpec',     'PartitionBoundSpec',     'PartitionRangeDatum',     'SinglePartitionSpec',   'PartitionCmd',
+            'RangeTblEntry',      'RTEPermissionInfo',    'RangeTblFunction',       'TableSampleClause',    'WithCheckOption',   'SortGroupClause',    'GroupingSet',
+            'WindowClause',       'RowMarkClause',    'WithClause',    'InferClause',        'OnConflictClause',     'CTESearchClause',      'CTECycleClause',
+            'CommonTableExpr',    'MergeWhenClause',  'TriggerTransition',  'JsonOutput', 'JsonArgument',  'JsonFuncExpr',   'JsonTablePathSpec',   'JsonTable',
+            'JsonTableColumn',    'JsonKeyValue', 'JsonParseExpr', 'JsonScalarExpr',    'JsonSerializeExpr',    'JsonObjectConstructor',    'JsonArrayConstructor', 'JsonArrayQueryConstructor',
+            'JsonAggConstructor', 'JsonObjectAgg', 'JsonArrayAgg',  'RawStmt',    'InsertStmt',   'DeleteStmt',  'UpdateStmt', 'MergeStmt',
+            'SelectStmt',         'SetOperationStmt',         'ReturnStmt',   'PLAssignStmt',          'CreateSchemaStmt',         'AlterTableStmt',       'ReplicaIdentityStmt',
+            'AlterTableCmd',      'AlterCollationStmt',   'AlterDomainStmt',    'GrantStmt',     'ObjectWithArgs',     'AccessPriv',  'GrantRoleStmt',
+            'AlterDefaultPrivilegesStmt', 'CopyStmt',  'VariableSetStmt',    'VariableShowStmt', 'CreateStmt',    'Constraint',   'CreateTableSpaceStmt',
+            'DropTableSpaceStmt', 'AlterTableSpaceOptionsStmt',    'AlterTableMoveAllStmt',    'CreateExtensionStmt',  'AlterExtensionStmt', 'AlterExtensionContentsStmt',    'CreateFdwStmt',
+            'AlterFdwStmt',       'CreateForeignServerStmt',  'AlterForeignServerStmt',        'CreateForeignTableStmt',       'CreateUserMappingStmt',    'AlterUserMappingStmt',
+            'DropUserMappingStmt',  'ImportForeignSchemaStmt',    'CreatePolicyStmt', 'AlterPolicyStmt',   'CreateAmStmt',    'CreateTrigStmt',
+            'CreateEventTrigStmt',    'AlterEventTrigStmt',   'CreatePLangStmt', 'CreateRoleStmt',    'AlterRoleStmt',    'AlterRoleSetStmt', 'DropRoleStmt',  'CreateSeqStmt',
+            'AlterSeqStmt',       'DefineStmt',  'CreateDomainStmt',   'CreateOpClassStmt',   'CreateOpClassItem',   'CreateOpFamilyStmt',
+            'AlterOpFamilyStmt',  'DropStmt',   'TruncateStmt',    'CommentStmt',  'SecLabelStmt',   'DeclareCursorStmt',   'ClosePortalStmt', 'FetchStmt', 'IndexStmt',
+            'CreateStatsStmt',    'StatsElem',    'AlterStatsStmt',   'CreateFunctionStmt',  'FunctionParameter',  'AlterFunctionStmt',  'DoStmt', 'InlineCodeBlock',   'CallStmt',
+            'CallContext',        'RenameStmt',       'AlterObjectDependsStmt',   'AlterObjectSchemaStmt',     'AlterOwnerStmt',  'AlterOperatorStmt',     'AlterTypeStmt',
+            'RuleStmt',           'NotifyStmt',           'ListenStmt',       'UnlistenStmt',          'TransactionStmt',        'CompositeTypeStmt',      'CreateEnumStmt',
+            'CreateRangeStmt',          'AlterEnumStmt',        'ViewStmt',      'LoadStmt',      'CreatedbStmt',         'AlterDatabaseStmt',       'AlterDatabaseRefreshCollStmt',
+            'AlterDatabaseSetStmt',      'DropdbStmt',        'AlterSystemStmt',      'ClusterStmt',     'VacuumStmt',        'VacuumRelation',       'ExplainStmt',        'CreateTableAsStmt',
+            'RefreshMatViewStmt',      'CheckPointStmt',      'DiscardStmt',        'LockStmt',        'ConstraintsSetStmt',        'ReindexStmt',        'CreateConversionStmt',
+            'CreateCastStmt',      'CreateTransformStmt',          'PrepareStmt',     'ExecuteStmt',         'DeallocateStmt',     'DropOwnedStmt',      'ReassignOwnedStmt',
+            'AlterTSDictionaryStmt',      'AlterTSConfigurationStmt',      'PublicationTable',       'PublicationObjSpec',        'CreatePublicationStmt',       'AlterPublicationStmt',
+            'CreateSubscriptionStmt',         'AlterSubscriptionStmt',      'DropSubscriptionStmt',       'PlannerGlobal',
+            'PlannerInfo',        'RelOptInfo',       'IndexOptInfo',     'ForeignKeyOptInfo',     'StatisticExtInfo',  'JoinDomain',        'EquivalenceClass',     'EquivalenceMember',
+            'PathKey',     'PathKeyInfo',    'PathTarget',      'ParamPathInfo',        'IndexClause',          'PlannedStmt',   'PlanRowMark', 'NestLoopParam',     
+            'GroupingSetData',      'RollupData', 'RestrictInfo',     'PlaceHolderVar',  'SpecialJoinInfo',
+            'OuterJoinClauseInfo',  'AppendRelInfo',     'RowIdentityVarInfo',       'PlaceHolderInfo',     'MinMaxAggInfo',   'PlannerParamItem',      'AggInfo',     'AggTransInfo',
+            'PartitionPruneInfo',  'PartitionedRelPruneInfo',    'PartitionPruneStepOp', 'PartitionPruneStepCombine', 'PlanInvalItem', 'ExprState', 'IndexInfo', 'ExprContext',
+            'ReturnSetInfo',   'ProjectionInfo',  'JunkFilter', 'OnConflictSetState',    'MergeActionState', 'ResultRelInfo', 'EState',    'WindowFuncExprState',  'SetExprState',
+            'SubPlanState',    'DomainConstraintState',    'ResultState',  'ProjectSetState',    'ModifyTableState', 'AppendState',   'MergeAppendState',    'RecursiveUnionState',
+            'BitmapAndState', 'BitmapOrState', 'ScanState', 'SeqScanState',  'SampleScanState',    'IndexScanState',   'IndexOnlyScanState',  'BitmapIndexScanState',   'BitmapHeapScanState',
+            'TidScanState',  'TidRangeScanState',  'SubqueryScanState',  'FunctionScanState',  'ValuesScanState',    'TableFuncScanState',   'CteScanState',    'NamedTuplestoreScanState',
+            'WorkTableScanState',    'ForeignScanState', 'CustomScanState',   'JoinState',   'NestLoopState',   'MergeJoinState',  'HashJoinState',  'MaterialState',  'MemoizeState',
+            'SortState',   'IncrementalSortState',    'GroupState',   'AggState',    'WindowAggState',   'UniqueState', 'GatherState',   'GatherMergeState',    'HashState',    'SetOpState',
+            'LockRowsState',   'LimitState',  'IndexAmRoutine', 'TableAmRoutine',    'TsmRoutine',   'EventTriggerData',    'TriggerData',  'TupleTableSlot', 'FdwRoutine',
+            'ExtensibleNode',   'ErrorSaveContext',    'IdentifySystemCmd',    'BaseBackupCmd',    'CreateReplicationSlotCmd', 'DropReplicationSlotCmd',    'AlterReplicationSlotCmd',
+            'StartReplicationCmd',    'ReadReplicationSlotCmd',   'TimeLineHistoryCmd',  'UploadManifestCmd',  'SupportRequestSimplify', 'SupportRequestSelectivity', 'SupportRequestCost',
+            'SupportRequestRows',   'SupportRequestIndexCondition',    'SupportRequestWFuncMonotonic', 'SupportRequestOptimizeWindowClause',    'Integer',  'Float',  'Boolean',    'String',
+            'BitString',   'ForeignKeyCacheInfo',     'AllocSetContext', 'GenerationContext', 'SlabContext',   'BumpContext',
+            'TIDBitmap', 'WindowObjectData']
 
-    def get_set_string(self) -> str:
-        if self.value == 'off':
-            for p in printer.subprinters:
-                p.enabled = False
-            return 'All printers are disabled, just print the object with default behavior'
-        elif self.value == 'origin':
-            for p in printer.subprinters:
-                p.enabled = False
-                if p.name == 'AnyNode':
-                    p.enabled = True
-            return 'Print all objects that inherit from ''Node'' using the built-in ''pprint'' function, attention, this will not used while gdb a core file'
-        elif self.value == 'trace':
-            for p in printer.subprinters:
-                p.enabled = True
-                if p.name == 'AnyNode':
-                    p.enabled = False
-            return 'Print all objects like ''pprint'' but in python, work anywhere'
-        elif self.value == 'info':
-            for p in printer.subprinters:
-                if p.name == 'AnyNode':
-                    p.enabled = False
-            return 'Trying to call some built-in functions to simple object, but may loss of information'
+        self.path_nodes = [
+            'Path', 'AggPath', 'MinMaxAggPath', 'WindowAggPath', 'SetOpPath', 'RecursiveUnionPath', 'LockRowsPath', 'ModifyTablePath', 'LimitPath',
+            'GatherMergePath', 'NestPath', 'IndexPath', 'BitmapHeapPath', 'BitmapAndPath', 'MergeAppendPath', 'BitmapOrPath', 'GroupResultPath',
+            'TidPath', 'TidRangePath', 'SubqueryScanPath', 'ForeignPath', 'CustomPath', 'AppendPath', 'MaterialPath', 'SortPath', 'ProjectSetPath',
+            'ProjectionPath', 'HashPath', 'MergePath', 'GatherPath', 'UniquePath', 'MemoizePath', 'GroupingSetsPath', 'UpperUniquePath', 'GroupPath',
+            'IncrementalSortPath',
+        ]
 
-    def get_show_string(self, pvalue):
-        if self.value == 'off':
-            return 'Current value is {}, All printers are disabled, just print the object with default behavior'.format(self.value)
-        elif self.value == 'origin':
-            return 'Current value is {}, Print all objects that inherit from ''Node'' using the built-in ''pprint'' function, attention, this will not used while gdb a core file'.format(self.value)
-        elif self.value == 'trace':
-            return 'Current value is {}, Print all objects like ''pprint'' but in python, work anywhere'.format(self.value)
-        elif self.value == 'info':
-            return 'Current value is {}, Trying to call some built-in functions to simple object, but may loss of information'.format(self.value)
+        self.plan_nodes = [
+            'Plan', 'Join', 'Result', 'ProjectSet', 'ModifyTable', 'Append', 'MergeAppend',  'RecursiveUnion', 'BitmapAnd', 'BitmapOr', 'Scan', 'SeqScan', 'SampleScan',
+            'IndexScan', 'IndexOnlyScan', 'BitmapIndexScan', 'BitmapHeapScan', 'TidScan', 'TidRangeScan', 'SubqueryScan', 'FunctionScan', 'ValuesScan', 'TableFuncScan', 'CteScan',
+            'NamedTuplestoreScan', 'WorkTableScan', 'ForeignScan', 'CustomScan', 'NestLoop',  'MergeJoin', 'HashJoin', 'Material', 'Memoize',
+            'Sort', 'IncrementalSort', 'Group', 'Agg', 'WindowAgg', 'Unique', 'Gather', 'GatherMerge', 'Hash', 'SetOp', 'LockRows', 'Limit',
+        ]
 
-printVerbose()
+    def gen_printer(self, name, BasePrinter):
+        class Printer(BasePrinter):
+            def to_string(self):
+                return self.common_to_string()
+
+            def children(self):
+                return self.common_children()
+
+        Printer.__name__ = name
+        return Printer
+
+    def gnerator(self):
+        [printer.add_printer(node, '^' + node + '$', self.gen_printer(node, NodePrinterGnerator)) for node in self.printer_nodes]
+        [printer.add_printer(node, '^' + node + '$', self.gen_printer(node, PathPrinterGenerator)) for node in self.path_nodes]
+        [printer.add_printer(node, '^' + node + '$', self.gen_printer(node, PlanPrinterGenerator)) for node in self.plan_nodes]
+
+gen = Gnerator()
+gen.gnerator()
 
 def register_postgres_printers(obj):
     gdb.printing.register_pretty_printer(obj, printer, True)
-    printVerbose()
