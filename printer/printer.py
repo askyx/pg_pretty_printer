@@ -483,9 +483,6 @@ class NodePrinterGnerator(PrinterGenerator):
                 if field.type.code == gdb.TYPE_CODE_PTR and self.val[field.name] != 0 and str(field.type) == 'char *':
                     fields.append('{}: {}'.format(field.name, getchars(self.val[field.name])))
         
-        #  no printable fields
-        if len(fields) == 0:
-            return None
         return node + ' {' + ', '.join(fields) + '}'
 
     def common_children(self):
