@@ -1,10 +1,11 @@
 
-cmake_minimum_required(VERSION 3.20.0)
-project(pg_pretty_printer VERSION 1.0.0 LANGUAGES CXX C)
+cmake_minimum_required(VERSION 3.10.0)
+project(pg_pretty_printer VERSION 1.0.0)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 find_package(PostgreSQL REQUIRED)
+find_package(Python3 REQUIRED)
 
 set(PTINTER ${CMAKE_SOURCE_DIR}/postgres-gdb.py)
 set(GDBINIT $ENV{HOME}/.gdbinit)

@@ -12,6 +12,13 @@ This GDB pretty printer provides a more informative representation of PostgreSQL
 
 * this is implemented on REL_17_BETA1
 
+### requirements
+
+* GDB 15 or later
+* Python 3.10 or later
+
+> works on Ubuntu 24.04 LTS will
+
 ### How to use
 
 
