@@ -4,7 +4,14 @@ import re
 from functools import reduce
 import platform
 
-printer = gdb.printing.RegexpCollectionPrettyPrinter('REL_17_BETA1')
+
+try:
+    version = str(gdb.parse_and_eval('server_version_num'))
+    version_int = (int)(version)
+    printer = gdb.printing.RegexpCollectionPrettyPrinter('PostgreSQL {}.{}'.format(version[0:2], version[-2:]))
+except gdb.error:
+    printer = gdb.printing.RegexpCollectionPrettyPrinter('PostgreSQL')
+
 
 def register_printer(name):
     def __registe(_printer):
@@ -20,7 +27,11 @@ class Printer:
         self.val = val
 
     def node_type(self):
-        return str(self.val['type'])[2:]
+        type = str(self.val['type'])[2:]
+        if type in ('Integer' ,'Float' ,'String' ,'BitString' ,'Null'):
+            return 'Value'
+        else:
+            return type
 
 # max print 100
 def getchars(arg, quote = True, length = 100):
@@ -45,6 +56,36 @@ def getchars(arg, quote = True, length = 100):
 
     return retval
 
+def is_target_type(val, type):
+    try:
+        val[type]
+        return True
+    except gdb.error:
+        return False
+
+def get_type(val):
+    if is_target_type(val, 'type'):
+        type = str(val['type'])[2:]
+        if version_int < 150000 and type in ('Integer' ,'Float' ,'String' ,'BitString' ,'Null'):
+            return 'Value'
+        else:
+            return type
+    elif is_target_type(val, 'xpr'):
+        return str(val['xpr']['type'])[2:]
+    elif is_target_type(val, 'path'):
+        return str(val['path']['type'])[2:]
+    elif is_target_type(val, 'plan'):
+        return str(val['plan']['type'])[2:]
+    elif is_target_type(val, 'jpath'):
+        return str(val['jpath']['path']['type'])[2:]
+    elif is_target_type(val, 'sort'):
+        return str(val['sort']['plan']['type'])[2:]
+    elif is_target_type(val, 'join'):
+        return str(val['join']['plan']['type'])[2:]
+    elif is_target_type(val, 'scan'):
+        return str(val['scan']['plan']['type'])[2:]
+
+    raise gdb.error('unknown type')
 
 @register_printer('Bitmapset')
 class BitmapsetPrinter(Printer):
@@ -100,25 +141,49 @@ class QualCostPrinter(Printer):
     def to_string(self):
         return '{{{:.2f}..{:.2f}}}'.format(float(self.val['startup']), float(self.val['per_tuple']))
 
+def ValuePrintInternal(val):
+    if str(val['type']) == 'T_Null':
+        return 'null'
+        
+    vt = str(val['type'])[2:]
+    ret = ''
+    if vt == 'Integer':
+        ret += str(val['val']['ival'])
+    elif vt == 'Float':
+        ret += getchars(val['val']['str'])
+    elif vt == 'BitString':
+        ret += getchars(val['val']['str'])
+    elif vt == 'String':
+        ret += getchars(val['val']['str'])
+    return '{} {{ {} }}'.format(vt, ret)
+
+@register_printer('Value')
+class ValuePrinter(Printer):
+    def to_string(self):
+        return ValuePrintInternal(self.val)
 
 @register_printer('A_Const')
 class A_ConstPrinter(Printer):
     def to_string(self):
-        if bool(self.val['isnull']):
-            return ''
-        vt = str(self.val['val']['node']['type'])[2:]
-        ret = ''
-        if vt == 'Integer':
-            ret += str(self.val['val']['ival']['ival'])
-        elif vt == 'Float':
-            ret += getchars(self.val['val']['fval']['fval'])
-        elif vt == 'Boolean':
-            ret += str(self.val['val']['boolval']['boolval'])
-        elif vt == 'BitString':
-            ret += getchars(self.val['val']['bsval']['bsval'])
-        elif vt == 'String':
-            ret += getchars(self.val['val']['sval']['sval'])
-        return '{} {{ {} }}'.format(vt, ret)
+        if version_int < 150000:
+            return ValuePrintInternal(self.val['val'])
+        else:
+            if bool(self.val['isnull']):
+                return 'null'
+            vt = str(self.val['val']['node']['type'])[2:]
+            ret = ''
+            if vt == 'Integer':
+                ret += str(self.val['val']['ival']['ival'])
+            elif vt == 'Float':
+                ret += getchars(self.val['val']['fval']['fval'])
+            elif vt == 'Boolean':
+                ret += str(self.val['val']['boolval']['boolval'])
+            elif vt == 'BitString':
+                ret += getchars(self.val['val']['bsval']['bsval'])
+            elif vt == 'String':
+                ret += getchars(self.val['val']['sval']['sval'])
+            return '{} {{ {} }}'.format(vt, ret)
+
 
 @register_printer('List')
 class ListPrinter:
@@ -127,23 +192,42 @@ class ListPrinter:
         def __init__(self, type, list) -> None:
             self.type = type
             self.list = list
+            if version_int <= 130000:
+                self.head = list['head']
             self.size = list['length']
             self.count = 0
 
         def __iter__(self):
             return self
 
-        def __next__(self):
+        def oldder_list(self):
+            if self.count == self.size:
+                raise StopIteration
+
+            node = self.head['data']
+            if str(self.type) == 'List':
+                type = get_type(cast2ptr(node['ptr_value'], 'Node'))
+                node = cast2ptr(node['ptr_value'], type).dereference()
+            elif str(self.type) == 'IntList':
+                node = int(node['int_value'])
+            elif str(self.type) == 'OidList':
+                node = int(node['oid_value'])
+            else:
+                node = node['xid_value']
+
+            result = (str(self.count), node)
+            self.count += 1
+            self.head = self.head['next']
+            return result
+        
+        def newer_list(self):
             if self.count == self.size:
                 raise StopIteration
             node = self.list['elements'][self.count]
 
             if str(self.type) == 'List':
-                type = cast2ptr(node['ptr_value'], 'Node')['type']
-                if int(type) > 0 and int(type) < gdb.parse_and_eval('(int) T_WindowObjectData'):
-                    node = cast2ptr(node, str(type)[2:]).dereference()
-                else:
-                    node = node['ptr_value']
+                type = get_type(cast2ptr(node['ptr_value'], 'Node'))
+                node = cast2ptr(node['ptr_value'], type).dereference()
             elif str(self.type) == 'IntList':
                 node = int(node['int_value'])
             elif str(self.type) == 'OidList':
@@ -155,9 +239,15 @@ class ListPrinter:
             self.count += 1
             return result
 
+        def __next__(self):
+            if version_int >= 130000:
+                return self.newer_list()
+            else:
+                return self.oldder_list()
+
     def __init__(self,  val) -> None:
         self.val = val
-        self.type = str(self.val['type'])[2:]
+        self.type = get_type(self.val)
 
     def to_string(self):
         return '%s with %s elements' % (self.type, self.val['length'])
@@ -191,33 +281,6 @@ class PrinterGenerator:
                               'grpColIdx','grpOperators','grpCollations',  # Group
                               ]
 
-    def is_target_type(self, val, type):
-        try:
-            val[type]
-            return True
-        except gdb.error:
-            return False
-        
-    def get_type(self, val):
-        if self.is_target_type(val, 'type'):
-            return str(val['type'])[2:]
-        elif self.is_target_type(val, 'xpr'):
-            return str(val['xpr']['type'])[2:]
-        elif self.is_target_type(val, 'path'):
-            return str(val['path']['type'])[2:]
-        elif self.is_target_type(val, 'plan'):
-            return str(val['plan']['type'])[2:]
-        elif self.is_target_type(val, 'jpath'):
-            return str(val['jpath']['path']['type'])[2:]
-        elif self.is_target_type(val, 'sort'):
-            return str(val['sort']['plan']['type'])[2:]
-        elif self.is_target_type(val, 'join'):
-            return str(val['join']['plan']['type'])[2:]
-        elif self.is_target_type(val, 'scan'):
-            return str(val['scan']['plan']['type'])[2:]
-
-        return None
-
     def printable(self, name):
         return name not in self.not_printable
 
@@ -230,7 +293,7 @@ class PrinterGenerator:
 class PathPrinterGenerator(PrinterGenerator):
     def __init__(self, val) -> None:
         super().__init__(val)
-        self.type = self.get_type(self.val)
+        self.type = get_type(self.val)
         self.basic_path = self.val.cast(gdb.lookup_type('Path'))
         self.actually_path = str(self.basic_path['pathtype'])[2:]
         self.extend_path = self.val.cast(gdb.lookup_type(self.type))
@@ -293,8 +356,8 @@ class PathPrinterGenerator(PrinterGenerator):
                         for i in self.path_children():
                             yield i
                         if field.name == 'jpath':
-                            outer_type = self.get_type(self.extend_path[field.name]['outerjoinpath'])
-                            inner_type = self.get_type(self.extend_path[field.name]['innerjoinpath'])
+                            outer_type = get_type(self.extend_path[field.name]['outerjoinpath'])
+                            inner_type = get_type(self.extend_path[field.name]['innerjoinpath'])
                             yield ('outerjoinpath', cast2ptr(self.extend_path[field.name]['outerjoinpath'], outer_type).dereference())
                             yield ('innerjoinpath', cast2ptr(self.extend_path[field.name]['innerjoinpath'], inner_type).dereference())
                             if self.extend_path[field.name]['joinrestrictinfo'] != 0:
@@ -308,7 +371,7 @@ class PathPrinterGenerator(PrinterGenerator):
                         if field.type.code == gdb.TYPE_CODE_PTR or str(field.type) == 'Relids':
 
                             #  get type and convert it
-                            type = self.get_type(self.extend_path[field.name])
+                            type = get_type(self.extend_path[field.name])
 
                             # convert to base type
                             base_type = self.get_convertable_type(type)
@@ -320,7 +383,7 @@ class PathPrinterGenerator(PrinterGenerator):
 class PlanPrinterGenerator(PrinterGenerator):
     def __init__(self, val) -> None:
         super().__init__(val)
-        self.type = self.get_type(self.val)
+        self.type = get_type(self.val)
         self.basic_plan = self.val.cast(gdb.lookup_type('Plan'))
         self.extend_plan = self.val.cast(gdb.lookup_type(self.type))
         self.array_filed = []
@@ -338,7 +401,12 @@ class PlanPrinterGenerator(PrinterGenerator):
 
     def plan_to_string(self):
         plan = self.basic_plan
-        return '(cost: {:.2f}..{:.2f} rows: {:.0f} width: {} parallel{{aware: {} safe: {}}}) async_capable: {} node_id: {}'.format(
+        if version_int < 140000:
+            return '(cost: {:.2f}..{:.2f} rows: {:.0f} width: {} parallel{{aware: {} safe: {}}})  node_id: {}'.format(
+                        float(plan['startup_cost']), float(plan['total_cost']), float(plan['plan_rows']), int(plan['plan_width']),
+                        bool(plan['parallel_aware']), bool(plan['parallel_safe']), int(plan['plan_node_id']))
+        else:
+            return '(cost: {:.2f}..{:.2f} rows: {:.0f} width: {} parallel{{aware: {} safe: {}}}) async_capable: {} node_id: {}'.format(
                         float(plan['startup_cost']), float(plan['total_cost']), float(plan['plan_rows']), int(plan['plan_width']),
                         bool(plan['parallel_aware']), bool(plan['parallel_safe']), bool(plan['async_capable']), int(plan['plan_node_id']))
 
@@ -351,10 +419,10 @@ class PlanPrinterGenerator(PrinterGenerator):
         if plan['qual']:
             fields.append(('qual', plan['qual'].dereference()))
         if plan['lefttree']:
-            outer_type = self.get_type(plan['lefttree'])
+            outer_type = get_type(plan['lefttree'])
             fields.append(('lefttree', cast2ptr(plan['lefttree'], outer_type).dereference()))
         if plan['righttree']:
-            inner_type = self.get_type(plan['righttree'])
+            inner_type = get_type(plan['righttree'])
             fields.append(('righttree', cast2ptr(plan['righttree'], inner_type).dereference()))
         if plan['extParam']:
             fields.append(('extParam', plan['extParam'].dereference()))
@@ -443,7 +511,7 @@ class PlanPrinterGenerator(PrinterGenerator):
                         if field.type.code == gdb.TYPE_CODE_PTR or str(field.type) == 'Relids':
 
                             #  get type and convert it
-                            type = self.get_type(self.extend_plan[field.name])
+                            type = get_type(self.extend_plan[field.name])
 
                             # convert to base type
                             base_type = self.get_convertable_type(type)
@@ -466,7 +534,7 @@ class CommonPrinter(Printer):
 class NodePrinterGnerator(PrinterGenerator):
     def common_to_string(self):
         fields = []
-        node = self.get_type(self.val)
+        node = get_type(self.val)
 
         for field in self.val.type.fields():
             if self.printable(field.name):
@@ -498,7 +566,7 @@ class NodePrinterGnerator(PrinterGenerator):
                     elif field.type.code == gdb.TYPE_CODE_PTR and self.val[field.name] != 0:
 
                         #  get type and convert it
-                        type = self.get_type(self.val[field.name])
+                        type = get_type(self.val[field.name])
 
                         # convert to base type
                         base_type = self.get_convertable_type(type)
